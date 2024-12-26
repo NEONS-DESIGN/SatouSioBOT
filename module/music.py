@@ -11,6 +11,9 @@ ytdl = YoutubeDL(YTDLP_OPTIONS)
 # サーバーごとのデータ管理する辞書
 server_music_data = {}
 
+# id = []
+# avatar = []
+
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
@@ -53,6 +56,8 @@ async def ensure_guild_data(guild_id):
     if guild_id not in server_music_data:
         server_music_data[guild_id] = {
             "queue": asyncio.Queue(),
+            "id": [],
+            "avatar": [],
             "voice_client": None,
             "current_player": None,
             "loop": False,  # ループ再生のフラグ
@@ -85,8 +90,10 @@ async def play_music(ctx, url, bot):
         if guild_data["queue"].empty():
             player = await YTDLSource.from_url(url, loop=bot.loop, stream=False, volume=guild_data["volume"])
         else:
-            player = YTDLInfo.from_url(url, volume=guild_data["volume"])
+            player = YTDLInfo.from_url(url)
         await guild_data["queue"].put(player)
+        guild_data["id"].append(ctx.author.name)
+        guild_data["avatar"].append(ctx.author.avatar)
 
         # 動画ID取得
         movie_id, type = await get_id(url)
@@ -113,7 +120,7 @@ async def play_music(ctx, url, bot):
         thumbnail_img = discord.File(fp=f_pass, filename=f_name, spoiler=False)
         # 再生時間
         time = await play_time(player.duration)
-        qsize = len(guild_data["queue"])
+        qsize = guild_data["queue"].qsize()
         if qsize != 1:
             embed.add_field(name="再生時間", value=time, inline=True)
             embed.add_field(name="待機曲", value=str(qsize)+" 件", inline=True)
@@ -121,7 +128,7 @@ async def play_music(ctx, url, bot):
             embed.add_field(name="再生時間", value=time, inline=False)
         # リクエスト者情報
         embed.set_image(url=f"attachment://{f_name}")
-        embed.set_footer(text=f"Requested by: {str(id.pop(0))}", icon_url=f"{avatar.pop(0)}")
+        embed.set_footer(text=f"Requested by: {str(guild_data["id"].pop(0))}", icon_url=guild_data["avatar"].pop(0))
 
         await ctx.respond(embed=embed, file=thumbnail_img, view=Link(player.url))
         return
