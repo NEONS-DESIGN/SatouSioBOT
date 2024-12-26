@@ -82,6 +82,12 @@ async def play_music(ctx, url, bot):
     voice_client = guild_data["voice_client"]
 
     async with ctx.typing():
+        if guild_data["queue"].empty():
+            player = await YTDLSource.from_url(url, loop=bot.loop, stream=False, volume=guild_data["volume"])
+        else:
+            player = YTDLInfo.from_url(url, volume=guild_data["volume"])
+        await guild_data["queue"].put(player)
+
         # 動画ID取得
         movie_id, type = await get_id(url)
         dst_path = f"./temp/{movie_id}.jpg"
@@ -107,8 +113,8 @@ async def play_music(ctx, url, bot):
         thumbnail_img = discord.File(fp=f_pass, filename=f_name, spoiler=False)
         # 再生時間
         time = await play_time(player.duration)
-        qsize = que.qsize()
-        if qsize != 0:
+        qsize = len(guild_data["queue"])
+        if qsize != 1:
             embed.add_field(name="再生時間", value=time, inline=True)
             embed.add_field(name="待機曲", value=str(qsize)+" 件", inline=True)
         else:
@@ -116,13 +122,8 @@ async def play_music(ctx, url, bot):
         # リクエスト者情報
         embed.set_image(url=f"attachment://{f_name}")
         embed.set_footer(text=f"Requested by: {str(id.pop(0))}", icon_url=f"{avatar.pop(0)}")
-        if guild_data["queue"].empty():
-            player = await YTDLSource.from_url(url, loop=bot.loop, stream=False, volume=guild_data["volume"])
-        else:
-            player = YTDLInfo.from_url(url, volume=guild_data["volume"])
-        await guild_data["queue"].put(player)
 
-        await ctx.send(embed=embed, file=thumbnail_img, view=Link(player.url))
+        await ctx.respond(embed=embed, file=thumbnail_img, view=Link(player.url))
         return
 
     if not voice_client.is_playing():

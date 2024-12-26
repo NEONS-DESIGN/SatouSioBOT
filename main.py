@@ -47,17 +47,19 @@ async def bot_play(ctx: commands.context, *, url: Option(str, description='曲�
         return
     if ctx.guild.voice_client is None:  # 鯖のどの部屋にも居ない場合
         # await ctx.author.voice.channel.connect()
-        await ensure_guild_data(ctx.guild.id)
-        channel = ctx.author.voice.channel
-        voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-        if not voice_client:
-            server_music_data[ctx.guild.id]["voice_client"] = await channel.connect()
-            await ctx.send(f"Joined {channel}!")
+        server_music_data[ctx.guild.id]["voice_client"] = await ctx.author.voice.channel.connect()
+        # channel = ctx.author.voice.channel
+        # voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+        # if not voice_client:
+        #     server_music_data[ctx.guild.id]["voice_client"] = await channel.connect()
+        #     await ctx.send(f"Joined {channel}!")
     if ctx.guild.voice_client is not None:  # コマンド主と違うボイスチャンネルにいる場合
         await ctx.voice_client.move_to(ctx.author.voice.channel)
 
     # 処理中表記
     await ctx.defer()
+
+    await ensure_guild_data(ctx.guild.id)
 
     try:
         return await play_music(ctx, url, bot)
