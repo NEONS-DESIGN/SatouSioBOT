@@ -22,3 +22,9 @@ class Color:
 	BG_WHITE       = '\033[47m'#(背景)白
 	BG_DEFAULT     = '\033[49m'#背景色をデフォルトに戻す
 	RESET          = '\033[0m'#全てリセット
+
+class Embed:
+	BLACK = 0x000000
+	WHITE = 0xffffff
+	RED = 0xff6b6b
+	LIGHT_GREEN = 0x1dd1a1

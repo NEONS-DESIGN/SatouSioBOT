@@ -30,7 +30,7 @@ async def sql_execution(sql: str):
 
         # SQLiteへアクセス。ファイルが存在しない場合は、自動作成。
         # 自動コミットモードに設定、自動切断
-        with sqlite3.connect("data/database.db", isolation_level=None) as con:
+        with sqlite3.connect("serverData.db", isolation_level=None) as con:
             with AutoCloseCursur(con) as cur:
                 # SQLの実行
                 res = cur.execute(sql)

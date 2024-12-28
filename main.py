@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from module.color import Color
 from module.embed import *
 from module.music import *
+from module.sqlite import sql_execution
 
 # .envファイルの読み込み
 load_dotenv()
@@ -46,25 +47,73 @@ async def bot_play(ctx: commands.context, *, url: Option(str, description='曲�
         await user_not_here_embed(ctx)
         return
     if ctx.guild.voice_client is None:  # 鯖のどの部屋にも居ない場合
-        # await ctx.author.voice.channel.connect()
         await ensure_guild_data(ctx.guild.id)
         server_music_data[ctx.guild.id]["voice_client"] = await ctx.author.voice.channel.connect()
-        # channel = ctx.author.voice.channel
-        # voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-        # if not voice_client:
-        #     server_music_data[ctx.guild.id]["voice_client"] = await channel.connect()
-        #     await ctx.send(f"Joined {channel}!")
     if ctx.guild.voice_client is not None:  # コマンド主と違うボイスチャンネルにいる場合
         await ctx.voice_client.move_to(ctx.author.voice.channel)
-
     # 処理中表記
     await ctx.defer()
-
     try:
         return await play_music(ctx, url, bot)
     except Exception as e:
         await exception_embed(ctx, "music", e)
         return print(f"\n{Color.RED}[ERROR]{Color.RESET}\n",e)
 
+@bot.command(name="vol", description="再生する音量の設定ができます。")
+@guild_only()
+async def bot_volume(ctx: commands.context, volume: Option(int, description='1~200の間で音量を入力してください。', name='音量', min_value=1, max_value=200)):
+    if ctx.author.bot:  # BOT自身に反応しなくする。
+        return
+    # 処理中表記
+    await ctx.defer()
+    try:
+        # ギルド情報取得
+        guild_id = int(ctx.guild_id)
+        guild_search = await sql_execution(f"SELECT * FROM serverData WHERE guild_id={guild_id};")
+        # 再生中の音量変更
+        if ctx.guild.voice_client:
+            if ctx.guild.voice_client.is_playing():
+                ctx.guild.voice_client.source.volume = volume / 100
+        # データベースへの書き込み
+        if not guild_search:
+            result = await sql_execution(f"INSERT INTO serverData (guild_id, volume) VALUES ({guild_id}, {volume / 100});")
+        elif guild_search[0] != "":
+            result = await sql_execution(f"UPDATE serverData SET volume={volume / 100} WHERE guild_id={guild_id};")
+        embed = discord.Embed(title=f"再生音量を、 {volume}% に設定しました。", color=Embed.LIGHT_GREEN)
+        await ctx.respond(embed=embed)
+        return
+    except Exception as e:
+        await exception_embed(ctx, "volume", e)
+        print(f"\n{Color.RED}[ERROR]{Color.RESET}\n",e)
+        return
+
+@bot.command(name="leave", description="BOTを退出させます。")
+@guild_only()
+async def bot_leave(ctx):
+    if ctx.author.bot:  # BOT自身に反応しなくする。
+        return
+    # BOTが接続していない場合
+    if ctx.guild.voice_client is None:
+        await not_connect_bot_embed(ctx)
+        return
+    # 処理中表記
+    await ctx.defer()
+    try:
+        # ギルド情報取得
+        guild_id = int(ctx.guild_id)
+        guild_data = server_music_data[guild_id]
+        que = guild_data["queue"]
+        if que.qsize() != 0:
+            server_music_data.pop(guild_id)
+        # 切断する
+        await ctx.guild.voice_client.disconnect()
+        await leave_embed(ctx)
+        return
+    except Exception as e:
+        await exception_embed(ctx, "leave", e)
+        print(f"\n{Color.RED}[ERROR]{Color.RESET}\n",e)
+        return
+
 # BOT起動
-bot.run(discordToken)
+if __name__ == "__main__":
+    bot.run(discordToken)

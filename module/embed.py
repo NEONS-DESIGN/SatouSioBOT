@@ -1,6 +1,8 @@
 import discord
+from module.color import Embed
 
-red = 0xff6b6b
+red = Embed.RED
+green = Embed.LIGHT_GREEN
 
 def help_pages():
     help_pages = [
@@ -23,7 +25,7 @@ def help_pages():
                     name="/rep", value="キューをリピートするよう変更ができます。\n再生中の曲はキューから取り出されているため、リピートの対象にはなりません。", inline=False,
                 ),
             ],
-            color=0x1dd1a1,
+            color=green,
         ),
         discord.Embed(
             title="コマンドヘルプ #2",
@@ -35,7 +37,7 @@ def help_pages():
                     name="/履歴削除", value="テキストチャンネルの履歴を削除できます。\n一気に全ては削除できません。", inline=False,
                 ),
             ],
-            color=0x1dd1a1,
+            color=green,
         ),
     ]
     return help_pages
@@ -67,4 +69,8 @@ async def exception_embed(ctx, message, error):
     """
     embed = discord.Embed(
         title=f"例外エラーが発生 ({message})", description=f"管理者(<@185708834264842240>)にお問い合わせください。\n詳細: {error}", color=red)
+    await ctx.respond(embed=embed)
+
+async def leave_embed(ctx):
+    embed = discord.Embed(title="退出しました。", color=green)
     await ctx.respond(embed=embed)
