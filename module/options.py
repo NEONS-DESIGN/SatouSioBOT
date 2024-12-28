@@ -1,6 +1,7 @@
 YTDLP_OPTIONS = {
-    'cookiefile': 'cookies.txt',
+    'cookiesfrombrowser': ('firefox', ),
     'format': 'bestaudio',
+    'writethumbnail': True,
     'extractaudio': True,
     'outtmpl': 'temp/%(extractor)s-%(id)s.%(ext)s',
     'restrictfilenames': True,
@@ -12,6 +13,11 @@ YTDLP_OPTIONS = {
     'no_warnings': True,
     'default_search': 'auto',
     'source_address': '0.0.0.0',
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["web_music"],
+        }
+    },
 }
 
-FFMPEG_OPTIONS = {"options": "-vn -threads 16"}
+FFMPEG_OPTIONS = {"options": "-vn"}
