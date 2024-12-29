@@ -15,9 +15,6 @@ ytdl = YoutubeDL(YTDLP_OPTIONS)
 # サーバーごとのデータ管理する辞書
 server_music_data = {}
 
-# 曲情報
-# result = {}
-
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume):
         super().__init__(source, volume)
@@ -55,7 +52,6 @@ class YTDLInfo():
             # プレイリストの最初だけ取得
             data = data["entries"][0]
         return cls(data=data)
-
 
 async def ensure_guild_data(guild_id):
     """
