@@ -22,7 +22,8 @@ bot = discord.Bot(description="Starting up", intents=intents)
 
 @bot.event  # 起動時に自動的に動くメソッド
 async def on_ready():
-    activity = discord.Activity(application_id=567032668668166181, type=2, name="/help", state="音楽再生BOTです。")
+    test = {"large_image": "mhwilds", "large_text": "THE LAUGHING MAN"}
+    activity = discord.Activity(application_id=855366359470178324, type=2, name="/help", state="音楽再生BOTです。", assets=test)
     # BOTのステータスを変更する
     await bot.change_presence(activity=activity, status=discord.Status.online)
     # BOTの情報表示
