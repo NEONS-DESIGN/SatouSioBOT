@@ -1,3 +1,8 @@
+import os
+
+# po_token取得
+PO_TOKEN = os.getenv("po_token")
+
 YTDLP_OPTIONS = {
     'cookiesfrombrowser': ('firefox', ),
     'format': 'bestaudio',
@@ -12,11 +17,12 @@ YTDLP_OPTIONS = {
     'quiet': False,
     'no_warnings': False,
     'default_search': 'auto',
-    #'force-ipv6': True,
+    'force-ipv6': True,
     'source_address': '0.0.0.0',
     'extractor_args': {
         'youtube': {
             'player_client': ['web_music'],
+            'po_token': [f'web_music.gvs+{PO_TOKEN}']
         }
     },
     'downloader': 'aria2c',

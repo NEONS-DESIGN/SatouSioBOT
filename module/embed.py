@@ -1,6 +1,5 @@
 import discord
 from module.color import Embed
-from module.other import play_time
 
 red = Embed.RED
 green = Embed.LIGHT_GREEN
@@ -42,25 +41,6 @@ def help_pages():
         ),
     ]
     return help_pages
-
-async def que_music_info_embed(ctx, url, player, guild_data):
-    # サムネイル取り込み処理
-    format = "jpg"
-    if player.extractor == "youtube":
-        format = "webp"
-    f_name = f"{player.extractor}-{player.id}.{format}"
-    f_pass = f"./temp/{player.extractor}-{player.id}.{format}"
-    thumbnail_img = discord.File(fp=f_pass, filename=f_name, spoiler=False)
-    embed = discord.Embed(title="待機曲に追加しました。", color=green)
-    embed.add_field(name="タイトル", value=f"[{player.title}]({url})", inline=False)
-    # 再生時間
-    time = await play_time(player.duration)
-    embed.add_field(name="再生時間", value=time, inline=True)
-    embed.add_field(name="待機曲", value=str(guild_data["queue"].qsize())+" 件", inline=True)
-    # リクエスト者情報
-    embed.set_image(url=f"attachment://{f_name}")
-    embed.set_footer(text=f"Requested by: {str(await guild_data['id'].get())}", icon_url=await guild_data["avatar"].get())
-    await ctx.respond(embed=embed, file=thumbnail_img)
 
 async def move_channel_embed(ctx):
     embed = discord.Embed(title="移動しました。", color=green)
@@ -105,6 +85,10 @@ async def playing_now_embed(ctx):
 async def empty_queue_embed(ctx):
     embed = discord.Embed(title="キューに曲がありません。", color=red)
     await ctx.respond(embed=embed)
+
+async def none_result_embed(ctx):
+    embed = discord.Embed(title="検索結果はありませんでした。", color=red)
+    await ctx.reply(embed=embed)
 
 async def exception_embed(ctx, message, error):
     """例外エラーをEmbedとして送信する

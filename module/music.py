@@ -5,7 +5,7 @@ from yt_dlp import YoutubeDL
 import discord
 
 from module.color import *
-from module.embed import play_completed_embed, que_music_info_embed
+from module.embed import play_completed_embed
 from module.options import YTDLP_OPTIONS, FFMPEG_OPTIONS
 from module.other import *
 from module.sqlite import sql_execution
@@ -149,5 +149,5 @@ async def play_music(ctx, url, bot):
     if not voice_client.is_playing():
         await play_next_song(ctx, bot)
     else:
-        await que_music_info_embed(ctx, url, player, guild_data)
+        await music_info_embed(ctx, player, guild_data)
     return
