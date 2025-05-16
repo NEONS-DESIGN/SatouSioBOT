@@ -1,8 +1,8 @@
 import discord
 from module.color import Embed
 
-red = Embed.RED
-green = Embed.LIGHT_GREEN
+RED = Embed.RED
+GREEN = Embed.LIGHT_GREEN
 
 def help_pages():
     help_pages = [
@@ -25,7 +25,7 @@ def help_pages():
                     name="/rep", value="キューをリピートするよう変更ができます。\n再生中の曲はキューから取り出されているため、リピートの対象にはなりません。", inline=False,
                 ),
             ],
-            color=green,
+            color=GREEN,
         ),
         discord.Embed(
             title="コマンドヘルプ #2",
@@ -37,57 +37,57 @@ def help_pages():
                     name="/履歴削除", value="テキストチャンネルの履歴を削除できます。\n一気に全ては削除できません。", inline=False,
                 ),
             ],
-            color=green,
+            color=GREEN,
         ),
     ]
     return help_pages
 
 async def move_channel_embed(ctx):
-    embed = discord.Embed(title="移動しました。", color=green)
+    embed = discord.Embed(title="移動しました。", color=GREEN)
     await ctx.respond(embed=embed)
 
 async def leave_embed(ctx):
-    embed = discord.Embed(title="退出しました。", color=green)
+    embed = discord.Embed(title="退出しました。", color=GREEN)
     await ctx.respond(embed=embed)
 
 async def skip_music_embed(ctx):
-    embed = discord.Embed(title="音楽をスキップしました。", color=green)
+    embed = discord.Embed(title="音楽をスキップしました。", color=GREEN)
     await ctx.respond(embed=embed)
 
 async def play_completed_embed(ctx):
-    embed = discord.Embed(title="全てのトラックの再生が終了しました。", color=green)
+    embed = discord.Embed(title="全てのトラックの再生が終了しました。", color=GREEN)
     await ctx.send(embed=embed)
 
 async def loop_switch_embed(ctx, state):
-    embed = discord.Embed(title=f"キューリストのループ再生を{state}に変更しました。", color=green)
+    embed = discord.Embed(title=f"キューリストのループ再生を{state}に変更しました。", color=GREEN)
     await ctx.respond(embed=embed)
 
 async def shuffle_complete_embed(ctx):
-    embed = discord.Embed(title=f"キューリストをシャッフルしました。", color=green)
+    embed = discord.Embed(title=f"キューリストをシャッフルしました。", color=GREEN)
     await ctx.respond(embed=embed)
 
 async def user_not_here_embed(ctx):
-    embed = discord.Embed(title="ボイスチャンネルに接続してください。", color=red)
+    embed = discord.Embed(title="ボイスチャンネルに接続してください。", color=RED)
     await ctx.respond(embed=embed)
 
 async def not_connect_bot_embed(ctx):
-    embed = discord.Embed(title="BOTが接続していません。", color=red)
+    embed = discord.Embed(title="BOTが接続していません。", color=RED)
     await ctx.respond(embed=embed)
 
 async def not_playing_embed(ctx):
-    embed = discord.Embed(title="音声が再生されていません。", color=red)
+    embed = discord.Embed(title="音声が再生されていません。", color=RED)
     await ctx.respond(embed=embed)
 
 async def playing_now_embed(ctx):
-    embed = discord.Embed(title="再生中は操作できません。", color=red)
+    embed = discord.Embed(title="再生中は操作できません。", color=RED)
     await ctx.respond(embed=embed)
 
 async def empty_queue_embed(ctx):
-    embed = discord.Embed(title="キューに曲がありません。", color=red)
+    embed = discord.Embed(title="キューに曲がありません。", color=RED)
     await ctx.respond(embed=embed)
 
 async def none_result_embed(ctx):
-    embed = discord.Embed(title="検索結果はありませんでした。", color=red)
+    embed = discord.Embed(title="検索結果はありませんでした。", color=RED)
     await ctx.reply(embed=embed)
 
 async def exception_embed(ctx, message, error):
@@ -101,5 +101,5 @@ async def exception_embed(ctx, message, error):
     embed = discord.Embed(
         title=f"例外エラーが発生 ({message})",
         description=f"管理者(<@185708834264842240>)にお問い合わせください。\n詳細: {error}",
-        color=red)
+        color=RED)
     await ctx.respond(embed=embed)
