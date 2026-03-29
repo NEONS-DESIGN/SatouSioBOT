@@ -21,6 +21,11 @@ except (KeyError, configparser.NoSectionError):
 	FFMPEG_HEADERS = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
 try:
+	DATABASE_PATH = config['MusicBot']['database_path']
+except (KeyError, ValueError, configparser.NoSectionError):
+	DATABASE_PATH = "data.db"
+
+try:
 	COOKIE_FILE_PATH = config['MusicBot']['cookie_file_path']
 except (KeyError, ValueError, configparser.NoSectionError):
 	COOKIE_FILE_PATH = "cookies.txt"

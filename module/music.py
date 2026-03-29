@@ -125,7 +125,7 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 		# DBから音量設定を取得
 		guild_vol = await sql_execution(f"SELECT volume FROM serverData WHERE guild_id={guild_id};")
 
-		if guild_vol is not None:
+		if guild_vol != "" and guild_vol is not None and len(guild_vol) > 0:
 			vol = guild_vol[0][0]
 
 		# 再生ソースの生成処理（ロード中アニメーションを付与）

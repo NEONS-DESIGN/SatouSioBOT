@@ -1,38 +1,59 @@
 import aiosqlite
-from module.color import Color
+import os
 
-async def sql_execution(sql: str):
+from module.options import DATABASE_PATH
+
+DB_PATH = DATABASE_PATH
+
+async def init_db():
     """
-    SQLiteデータベースに対して非同期でSQL文を実行し、結果を取得する。
+    データベースファイルとテーブルの存在を確認し、存在しない場合は自動生成する。
+    """
+    # テーブル作成用クエリ
+    # スキーマ: guild_id (INTEGER/PRIMARY KEY), volume (REAL)
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS "serverData" (
+        "guild_id" INTEGER PRIMARY KEY UNIQUE NOT NULL,
+        "volume" REAL
+    );
+    """
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(create_table_query)
+            await db.commit()
+    except Exception as e:
+        # 初期化失敗時のエラー処理
+        print(f"[SQL ERROR] データベースの初期化に失敗しました: {e}")
+
+async def sql_execution(query: str, params: tuple = ()):
+    """
+    SQLクエリを実行し、結果をリスト形式で返却する。
+    実行前にDBの初期化状態を確認する。
 
     Parameters
     ----------
-    sql : str
-        実行するSQL文。
+    query : str
+        実行するSQLクエリ
+    params : tuple
+        クエリに渡すパラメータ
 
     Returns
     -------
     list
-        fetchall()による取得結果のリスト（タプルのリスト）。
-        条件に一致するデータが存在しない場合は空のリストを返す。
-
-    Notes
-    -----
-    - aiosqliteライブラリを使用し、イベントループのブロッキングを防止している。
-    - isolation_level=None を指定し、自動コミットモードで動作する。
-    - 実行には aiosqlite のインストールが必須。
+        クエリの実行結果（フェッチデータ）
     """
-    try:
-        # aiosqliteを使用して非同期でデータベースに接続および切断
-        async with aiosqlite.connect("serverData.db", isolation_level=None) as db:
-            async with db.execute(sql) as cursor:
-                # 実行結果の取得
-                result = await cursor.fetchall()
-                return result
+    # 実行のたびにファイル存在チェックを行い、なければ初期化
+    if not os.path.exists(DB_PATH):
+        await init_db()
 
-    except aiosqlite.Error as e:
-        # SQLite関連のエラー処理
-        raise Exception(f"{Color.BG_RED}[SQL ERROR]{Color.RESET}:\n{e}")
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(query, params) as cursor:
+                result = await cursor.fetchall()
+                await db.commit()
+                return result
     except Exception as e:
-        # その他の予期せぬエラー処理
-        raise Exception(f"{Color.BG_RED}[ERROR]{Color.RESET}:\n{e}")
+        # クエリ実行失敗時のエラー処理
+        print(f"[SQL ERROR] クエリ実行エラー: {e}")
+        return None
