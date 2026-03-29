@@ -24,7 +24,7 @@ YouTube、ニコニコ動画、SoundCloudなど複数のプラットフォーム
 以下のコマンドを実行して、必要なPythonライブラリを一括でインストールしてください。
 
 ```bash
-pip install -U discord.py yt-dlp python-dotenv pyshorteners aiohttp aiosqlite
+pip install -r requirements.txt
 ```
 
 ---
