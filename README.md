@@ -2,6 +2,7 @@
 <p align="center">砂糖塩という、Discordの音楽再生Botです。できるだけ起動するだけで使用ができるように制作されています。</p>
 
 <p align="center">
+  <a href="https://www.python.org/downloads/release/python-31312/"><img src="https://img.shields.io/badge/Python-v3.13.12-ffde57" alt="/Discord.py"></a>
   <a href="https://github.com/Rapptz/discord.py"><img src="https://img.shields.io/badge/Discord.py-v2.7.1-3498db" alt="/Discord.py"></a>
   <a href="https://github.com/ellisonleao/pyshorteners/"><img src="https://img.shields.io/badge/pyshorteners-v1.0.1-34495e" alt="/pyshorteners"></a>
   <a href="https://github.com/yt-dlp/yt-dlp"><img src="https://img.shields.io/badge/yt--dlp-v2026.03.17-FF0000" alt="/yt-dlp"></a>
