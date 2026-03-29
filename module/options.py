@@ -130,6 +130,7 @@ YTDLP_OPTIONS = {
 	'logger': YTDLLogger(),
 	'progress_hooks': [yt_dlp_progress_hook],
 
+	# Python 3.13以降用のImpersonateTargetオプション
 	# 文字列ではなくImpersonateTargetオブジェクトを生成して渡す
 	# これにより内部のassert isinstance(target, ImpersonateTarget)をパスする
 	'impersonate': ImpersonateTarget.from_str('chrome'),
