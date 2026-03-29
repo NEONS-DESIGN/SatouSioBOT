@@ -4,10 +4,10 @@ async function main() {
   try {
     console.log('トークンを生成中...');
     const result = await generate();
-    
+
     console.log('--- 取得完了 ---');
-    console.log('Visitor Data:', result.visitorData);
     console.log('PO Token:', result.poToken);
+    console.log('Visitor Data:', result.visitorData);
   } catch (error) {
     console.error('エラー:', error);
   }

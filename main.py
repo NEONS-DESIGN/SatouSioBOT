@@ -2,13 +2,14 @@ import os
 import random
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 from module.color import Color
 from module.embed import *
 from module.music import *
 from module.sqlite import sql_execution
+from module.cookie_refresh import CookieManager
 
 load_dotenv()
 discordToken = os.getenv("discord_api")
@@ -16,6 +17,13 @@ discordToken = os.getenv("discord_api")
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="/", intents=intents, help_command=None)
+
+cookie_manager = CookieManager()
+
+@tasks.loop(hours=24)
+async def auto_cookie_refresh():
+	# Botの稼働中にバックグラウンドでCookieを更新
+	await cookie_manager.fetch_youtube_cookies()
 
 class SimplePaginator(discord.ui.View):
 	def __init__(self, embeds):
