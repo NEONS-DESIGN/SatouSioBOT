@@ -1,153 +1,224 @@
 import asyncio
-# import threading
-# import xml.etree.ElementTree as ET
-from yt_dlp import YoutubeDL
 import discord
+from discord.ext import commands
+from yt_dlp import YoutubeDL
+from typing import Dict, Any
+import sys
+import itertools
 
 from module.color import *
-from module.embed import play_completed_embed
+from module.embed import *
 from module.options import YTDLP_OPTIONS, FFMPEG_OPTIONS
 from module.other import *
 from module.sqlite import sql_execution
 
 ytdl = YoutubeDL(YTDLP_OPTIONS)
-
-# サーバーごとのデータ管理する辞書
-server_music_data = {}
+server_music_data: Dict[int, Dict[str, Any]] = {}
 
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume):
+    def __init__(self, source: discord.AudioSource, *, data: dict, volume: float = 0.5):
         super().__init__(source, volume)
-
-        # 各種データ摘出
-        self.title = data.get("title")
-        self.url = data.get("url")
-        self.duration = data.get('duration')
-        self.extractor = data.get("extractor")
-        self.id = data.get("id")
+        self.data = data
+        self.title = data.get('title', 'Unknown Title')
+        self.url = data.get('url', '')
 
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False, volume):
+    async def from_url(cls, url: str, *, loop: asyncio.AbstractEventLoop = None, stream: bool = True, volume: float = 0.5):
         loop = loop or asyncio.get_event_loop()
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-        if "entries" in data:
-            # プレイリストの最初だけ取得
-            data = data["entries"][0]
-        filename = data["url"] if stream else ytdl.prepare_filename(data)
+
+        if 'entries' in data and len(data['entries']) > 0:
+            data = data['entries']
+
+        filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS), data=data, volume=volume)
 
-class YTDLInfo():
-    def __init__(self, data: dict):
-        self.data = data
-        # 各種データ摘出
-        self.title = data.get("title")
-        self.url = data.get("player_url")
-        self.duration = data.get('duration')
-        self.extractor = data.get("extractor")
-        self.id = data.get("id")
-    @classmethod
-    def from_url(cls, url):
-        data = ytdl.extract_info(url)
-        if "entries" in data:
-            # プレイリストの最初だけ取得
-            data = data["entries"][0]
-        return cls(data=data)
-
-async def ensure_guild_data(guild_id):
-    """
-    サーバー(guild)のデータがなければ初期化します
-
-    Args:
-        guild_id (int): ギルドID
-    """
+async def ensure_guild_data(guild_id: int):
     if guild_id not in server_music_data:
         server_music_data[guild_id] = {
-            "queue": asyncio.Queue(),
-            "id": asyncio.Queue(),
-            "avatar": asyncio.Queue(),
-            "url": asyncio.Queue(),
-            "voice_client": None,
-            "current_player": None,
-            "loop": False,  # ループ再生のフラグ
+            "queue": [],
+            "loop": False,
+            "current": None
         }
 
-async def play_next_song(ctx, bot):
+async def loading_spinner(task_future: asyncio.Future, message: str = "yt-dlp 解析中"):
     """
-    次の曲を再生
-
-    Args:
-        ctx (commands.context):
-        guild_id (int):
-        bot (discord.Bot):
+    非同期タスクの完了を待機しつつ、コンソールにローディングアニメーションを描画する。
+    注意: 標準出力のフラッシュを利用しているため、他スレッドからのprintと衝突する可能性がある。
     """
-    guild_data = server_music_data[ctx.guild_id]
-    if guild_data["loop"] and guild_data["current_player"]:
-        # ループが有効な場合、現在の曲を再度キューに追加
-        await guild_data["queue"].put(guild_data["current_player"])
-        await guild_data["id"].put(guild_data["id"])
-        await guild_data["avatar"].put(guild_data["avatar"])
-        await guild_data["url"].put(guild_data["url"])
+    spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+    colors = itertools.cycle([Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA])
 
-    if not guild_data["queue"].empty():
-        player = await guild_data["queue"].get()
-        guild_data["current_player"] = player
-        guild_data["voice_client"].play(
-            player,
-            after=lambda e: asyncio.run_coroutine_threadsafe(play_next_song(ctx, bot), bot.loop).result(),
-        )
-        await music_info_embed(ctx, player, guild_data)
-    else:
-        await ctx.guild.voice_client.disconnect()
+    while not task_future.done():
+        sys.stdout.write(f"\r{next(colors)}[{next(spinner)}] {message}...{Color.RESET}")
+        sys.stdout.flush()
+        await asyncio.sleep(0.1)
+
+    # タスク完了後に表示をクリーンアップ
+    sys.stdout.write(f"\r{Color.GREEN}[✓] {message} 完了!{' ' * 20}{Color.RESET}\n")
+    sys.stdout.flush()
+
+async def play_next_song(ctx: commands.Context, bot: commands.Bot):
+    guild_id = ctx.guild.id
+    data = server_music_data[guild_id]
+    voice_client = ctx.guild.voice_client
+
+    if data["loop"] and data["current"]:
+        data["queue"].append(data["current"])
+
+    if not data["queue"]:
+        data["current"] = None
+        if voice_client and voice_client.is_connected():
+            await voice_client.disconnect()
         await play_completed_embed(ctx)
         return
 
-async def music_info_embed(ctx, player, guild_data):
-    guild_data = server_music_data[ctx.guild_id]
-    url = await guild_data["url"].get()
-    qsize = guild_data["queue"].qsize()
-    # サムネイル取り込み処理
-    format = "jpg"
-    if player.extractor == "youtube":
-        format = "webp"
-    f_name = f"{player.extractor}-{player.id}.{format}"
-    f_pass = f"./temp/{player.extractor}-{player.id}.{format}"
-    thumbnail_img = discord.File(fp=f_pass, filename=f_name, spoiler=False)
-    embed = discord.Embed(title="再生中", color=Embed.LIGHT_GREEN)
-    embed.add_field(name="タイトル", value=f"[{player.title}]({url})", inline=False)
-    # 再生時間
-    time = await play_time(player.duration)
-    if qsize == 0:
-        embed.add_field(name="再生時間", value=time, inline=False)
-    else:
-        embed.add_field(name="再生時間", value=time, inline=True)
-        embed.add_field(name="待機曲", value=str(qsize)+" 件", inline=True)
-    # リクエスト者情報
-    embed.set_image(url=f"attachment://{f_name}")
-    embed.set_footer(text=f"Requested by: {str(ctx.author.name)}", icon_url=ctx.author.avatar)
-    await ctx.respond(embed=embed, file=thumbnail_img)
+    next_track = data["queue"].pop(0)
+    data["current"] = next_track
 
-async def play_music(ctx, url, bot):
-    await ensure_guild_data(ctx.guild.id)
-    guild_data = server_music_data[ctx.guild.id]
-    voice_client = guild_data["voice_client"]
+    try:
+        guild_db = await sql_execution(f"SELECT * FROM serverData WHERE guild_id={guild_id};")
+        vol = 0.25
 
-    # データベース検索
-    guild_db = await sql_execution(f"SELECT * FROM serverData WHERE guild_id={ctx.guild_id};")
-    # 音量変更
-    if not guild_db or guild_db[0][1] is None:
-        volume = 0.25
-    elif guild_db[0][1]:
-            volume = guild_db[0][1]
+        try:
+            if guild_db and isinstance(guild_db, list) and len(guild_db) > 0:
+                row = guild_db
+                if isinstance(row, (list, tuple)) and len(row) > 1 and row is not None:
+                    vol = float(row)
+        except Exception as db_err:
+            pass
 
-    player = await YTDLSource.from_url(url, loop=bot.loop, stream=False, volume=volume)
+        # 再生ソースの生成処理（ロード中アニメーションを付与）
+        fetch_task = bot.loop.create_task(
+            YTDLSource.from_url(next_track["url"], loop=bot.loop, stream=True, volume=vol)
+        )
+        bot.loop.create_task(loading_spinner(fetch_task, f"音源のロード中: {next_track.get('title', 'Unknown')}"))
+        player = await fetch_task
 
-    await guild_data["queue"].put(player)
-    await guild_data["id"].put(ctx.author.name)
-    await guild_data["avatar"].put(ctx.author.avatar)
-    await guild_data["url"].put(url)
+        def after_playing(error):
+            if error:
+                print(f"[ERROR] 再生時エラー: {error}")
+            asyncio.run_coroutine_threadsafe(play_next_song(ctx, bot), bot.loop)
 
-    if not voice_client.is_playing():
+        voice_client.play(player, after=after_playing)
+        await music_info_embed(ctx, player, len(data["queue"]))
+
+    except Exception as e:
+        print(f"[ERROR] 再生ソース生成エラー: {e}")
+        await playback_error_embed(ctx, next_track.get('title', '不明な曲'))
         await play_next_song(ctx, bot)
+
+async def music_info_embed(ctx: commands.Context, player: YTDLSource, queue_count: int):
+    try:
+        embed = discord.Embed(title="🎵 再生中", color=0x1DB954)
+        title_str = str(player.title) if player.title else "Unknown Title"
+        url_str = str(player.url) if player.url else ""
+
+        if len(title_str) > 100:
+            title_str = title_str[:97] + "..."
+
+        field_value = f"[{title_str}]({url_str})"
+        if len(field_value) > 1024:
+            field_value = title_str[:1024]
+
+        embed.add_field(name="タイトル", value=field_value, inline=False)
+
+        raw_duration = player.data.get('duration') or 0
+        duration = await play_time(raw_duration)
+
+        embed.add_field(name="再生時間", value=duration, inline=True)
+        embed.add_field(name="待機数", value=f"{queue_count} 曲", inline=True)
+
+        icon_url = ctx.author.display_avatar.url if ctx.author.display_avatar else None
+        embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=icon_url)
+
+        thumbnail_url = player.data.get("thumbnail")
+
+        if thumbnail_url:
+            embed.set_image(url=thumbnail_url)
+            await ctx.send(embed=embed)
+        else:
+            fallback_image_path = "./default_thumb.png"
+            try:
+                file = discord.File(fallback_image_path, filename="default.png")
+                embed.set_image(url="attachment://default.png")
+                await ctx.send(embed=embed, file=file)
+            except FileNotFoundError:
+                fallback_url = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=1024&auto=format&fit=crop"
+                embed.set_image(url=fallback_url)
+                await ctx.send(embed=embed)
+
+    except Exception as e:
+        print(f"[ERROR] Embed表示エラー: {e}")
+        fallback_title = player.title if player and player.title else "Unknown Title"
+        try:
+            await music_info_fallback_embed(ctx, fallback_title)
+        except Exception:
+            pass
+
+async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
+    await ensure_guild_data(ctx.guild.id)
+    data = server_music_data[ctx.guild.id]
+
+    try:
+        search_query = url if url.startswith(('http://', 'https://')) else f"ytsearch1:{url}"
+
+        # 検索・メタデータ取得処理（ロード中アニメーションを付与）
+        fetch_task = bot.loop.run_in_executor(
+            None,
+            lambda: ytdl.extract_info(search_query, download=False)
+        )
+        bot.loop.create_task(loading_spinner(fetch_task, "メタデータの解析中"))
+        info = await fetch_task
+
+        if info is None:
+            raise ValueError("情報の取得に失敗")
+
+        queued_count = 0
+        playlist_title = info.get("title", "Unknown Playlist")
+
+        if 'entries' in info:
+            entries = list(info['entries'])
+            if not entries:
+                raise ValueError("動画データが存在しない(空のプレイリストまたは非公開動画のみ)")
+
+            for entry in entries:
+                if entry is None:
+                    continue
+
+                track_url = entry.get("url") or entry.get("webpage_url")
+
+                if track_url:
+                    track_info = {
+                        "url": track_url,
+                        "title": entry.get("title", "Unknown Title"),
+                        "author_id": ctx.author.id
+                    }
+                    data["queue"].append(track_info)
+                    queued_count += 1
+
+        else:
+            track_info = {
+                "url": info.get("webpage_url", info.get("url", url)),
+                "title": info.get("title", "Unknown Title"),
+                "author_id": ctx.author.id
+            }
+            data["queue"].append(track_info)
+            queued_count = 1
+            playlist_title = track_info["title"]
+
+        if queued_count == 0:
+            raise ValueError("再生可能な動画が見つからない")
+
+    except Exception as e:
+        print(f"[ERROR] play_music解析エラー: {e}")
+        await load_error_embed(ctx, e)
+        return
+
+    if not ctx.guild.voice_client.is_playing():
+        await play_next_song(ctx, bot)
+
+        if queued_count > 1:
+            await playlist_added_embed(ctx, playlist_title, queued_count)
     else:
-        await music_info_embed(ctx, player, guild_data)
-    return
+        await queue_added_embed(ctx, playlist_title, queued_count)
