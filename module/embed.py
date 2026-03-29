@@ -101,8 +101,8 @@ async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int):
 	if len(field_value) > 1024: field_value = title[:1024]
 
 	embed.add_field(name="タイトル", value=field_value, inline=False)
-	embed.add_field(name="長さ", value=duration, inline=True)
-	embed.add_field(name="待機順序", value=f"{queue_pos} 番目", inline=True)
+	embed.add_field(name="再生時間", value=duration, inline=True)
+	embed.add_field(name="待機数", value=f"{queue_pos} 曲", inline=True)
 
 	icon_url = ctx.author.display_avatar.url if ctx.author.display_avatar else None
 	embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=icon_url)
