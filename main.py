@@ -41,7 +41,7 @@ async def on_ready():
     await bot.tree.sync()
     activity = discord.Activity(type=discord.ActivityType.playing, name="音楽再生BOTです。 /help")
     await bot.change_presence(activity=activity, status=discord.Status.online)
-    print(f"{Color.GREEN}[READY]{Color.RESET} Logged in as {bot.user.name} (ID: {bot.user.id})")
+    print(f"{Color.GREEN}[READY]{Color.RESET} {bot.user.name} (ID: {bot.user.id}) としてログインしました。")
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -59,8 +59,7 @@ async def bot_help(ctx: commands.Context):
         embeds = help_pages()
         view = SimplePaginator(embeds)
 
-        # 修正箇所: embed=embeds ではなく、リストの先頭要素 embed=embeds を指定する
-        await ctx.send(embed=embeds, view=view, ephemeral=True)
+        await ctx.send(embed=embeds[0], view=view, ephemeral=True)
     except Exception as e:
         # エラー処理
         await exception_embed(ctx, "help", e)
