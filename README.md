@@ -1,5 +1,5 @@
 <h1 align="center">SatouSioBOT</h1>
-<p align="center">砂糖塩という、Discordの音楽再生Botです。</p>
+<p align="center">砂糖塩という、Discordの音楽再生Botです。できるだけ起動するだけで使用ができるように制作されています。</p>
 
 <p align="center">
   <a href="https://github.com/Rapptz/discord.py"><img src="https://img.shields.io/badge/Discord.py-v2.7.1-3498db" alt="/Discord.py"></a>
