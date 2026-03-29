@@ -112,6 +112,10 @@ def yt_dlp_progress_hook(d):
 youtube_args = {
 	'player_client': ['web_music', 'android']
 }
+# ニコニコ動画用の引数を追加
+nicovideo_args = {
+	'action_wait_time': 1.0, # 解析に失敗しやすい場合の間隔調整
+}
 if PO_TOKEN:
 	youtube_args['po_token'] = [f'web_music.gvs+{PO_TOKEN}']
 if VISITOR_DATA:
@@ -127,6 +131,7 @@ YTDLP_OPTIONS = {
 	'extract_flat': 'in_playlist',
 	'playlistend': PLAYLIST_LIMIT,
 	'nocheckcertificate': True,
+	# 失敗した動画をスキップして処理を継続するかどうか
 	'ignoreerrors': True,
 
 	# ロガーを機能させるために標準出力を有効化
@@ -144,7 +149,8 @@ YTDLP_OPTIONS = {
 	'allow_remote_strings': True,
 	'remote_components': ['ejs:github'],
 	'extractor_args': {
-		'youtube': youtube_args
+		'youtube': youtube_args,
+		'nicovideo': nicovideo_args
 	},
 	'headers': {
 		'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',

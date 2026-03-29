@@ -22,15 +22,12 @@ class SimplePaginator(discord.ui.View):
 		super().__init__(timeout=180)
 		self.embeds = embeds
 		self.current_page = 0
-
 	async def update_view(self, interaction: discord.Interaction):
 		await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
-
 	@discord.ui.button(label="◀ 前へ", style=discord.ButtonStyle.primary)
 	async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = (self.current_page - 1) % len(self.embeds)
 		await self.update_view(interaction)
-
 	@discord.ui.button(label="次へ ▶", style=discord.ButtonStyle.primary)
 	async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = (self.current_page + 1) % len(self.embeds)
@@ -58,7 +55,6 @@ async def bot_help(ctx: commands.Context):
 	try:
 		embeds = help_pages()
 		view = SimplePaginator(embeds)
-
 		await ctx.send(embed=embeds[0], view=view, ephemeral=True)
 	except Exception as e:
 		# エラー処理
@@ -66,12 +62,15 @@ async def bot_help(ctx: commands.Context):
 		print(f"{Color.RED}[ERROR]{Color.RESET} help:", e)
 
 @bot.hybrid_command(name="p", description="曲を再生します（YouTube/ニコニコ/SoundCloud対応）")
-@app_commands.describe(url="曲のURLかタイトルを入力してください。")
+@app_commands.describe(query="曲のURLかタイトルを入力してください。") # 引数名を query に合わせる
 @commands.guild_only()
-async def bot_play(ctx: commands.Context, *, url: str):
+async def bot_play(ctx: commands.Context, *, query: str): # url から query に変更
+	"""
+	指定されたURLまたはタイトルから音楽を解析し、再生を開始する。
+	注意: 引数名を変更した場合、関数内で参照している変数名もすべて統一する必要がある。
+	"""
 	if not ctx.author.voice:
 		return await user_not_here_embed(ctx)
-
 	await ctx.defer()
 	try:
 		if not ctx.guild.voice_client:
@@ -80,8 +79,8 @@ async def bot_play(ctx: commands.Context, *, url: str):
 		elif ctx.guild.voice_client.channel != ctx.author.voice.channel:
 			await ctx.guild.voice_client.move_to(ctx.author.voice.channel)
 			server_music_data[ctx.guild.id]["voice_client"] = ctx.guild.voice_client
-
-		await play_music(ctx, url, bot)
+		# 内部で呼び出す関数の引数も query に変更
+		await play_music(ctx, query, bot)
 	except Exception as e:
 		await exception_embed(ctx, "play", e)
 		print(f"{Color.RED}[ERROR]{Color.RESET} play:", e)
@@ -94,10 +93,8 @@ async def bot_volume(ctx: commands.Context, volume: app_commands.Range[int, 1, 2
 	try:
 		guild_id = ctx.guild.id
 		target_vol = volume / 100
-
 		if ctx.guild.voice_client and ctx.guild.voice_client.source:
 			ctx.guild.voice_client.source.volume = target_vol
-
 		guild_search = await sql_execution(f"SELECT guild_id FROM serverData WHERE guild_id={guild_id};")
 		if not guild_search:
 			await sql_execution(f"INSERT INTO serverData (guild_id, volume) VALUES ({guild_id}, {target_vol});")
@@ -127,10 +124,8 @@ async def bot_shuffle(ctx: commands.Context):
 	try:
 		await ensure_guild_data(ctx.guild.id)
 		queue = server_music_data[ctx.guild.id]["queue"]
-
 		if not queue:
 			return await empty_queue_embed(ctx)
-
 		random.shuffle(queue)
 		await shuffle_complete_embed(ctx)
 	except Exception as e:

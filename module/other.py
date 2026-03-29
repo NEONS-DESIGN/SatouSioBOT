@@ -37,6 +37,36 @@ class Link(discord.ui.View):
 				print(f"{Color.RED}[ERROR]{Color.RESET} 短縮失敗 (残り {2-i}回): {e}")
 				await asyncio.sleep(1)
 
+async def shorten_url(url: str):
+	"""
+	URLの文字列長が一定（100文字）を超える場合、短縮URLを生成して返却する。
+	APIキー不要のTinyURLを使用し、同期処理を非同期スレッドで実行する。
+
+	Parameters
+	----------
+	url : str
+		短縮対象のURL
+
+	Returns
+	-------
+	str
+		短縮されたURL、またはエラー・短尺時のオリジナルURL
+	"""
+	# 短いURLはそのまま返却して処理を効率化する
+	if not url or len(url) < 100:
+		return url
+
+	try:
+		s = pyshorteners.Shortener()
+		# 同期ライブラリの実行によるイベントループの停止を回避
+		# TinyURLはAPIキーなしで利用可能
+		short_url = await asyncio.to_thread(s.tinyurl.short, url)
+		return short_url
+	except Exception as e:
+		# 短縮失敗時はオリジナルのURLを返却し、処理を継続させる
+		print(f"{Color.RED}[ERROR]{Color.RESET} URL短縮に失敗しました: {e}")
+		return url
+
 async def download_file(url: str, dst_path: str):
 	"""aiohttpを使用して非同期にファイルをダウンロードする"""
 	try:
