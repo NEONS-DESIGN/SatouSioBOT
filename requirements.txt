@@ -1,0 +1,17 @@
+# Discord Bot Framework
+discord.py==2.7.1
+
+# YouTube/Media Downloader (with TLS fingerprint impersonation)
+yt-dlp[default,curl-cffi]
+yt-dlp-ejs
+
+# Database (Async SQLite)
+aiosqlite
+
+# Utilities
+python-dotenv
+pyshorteners==1.0.1
+aiohttp
+
+# JS Runtimes (Note: Needs to be installed on the OS as well)
+# e.g., Node.js or Deno
