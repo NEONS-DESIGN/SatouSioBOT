@@ -117,6 +117,39 @@ async def help_mention_embed(message: discord.Message):
 	embed = discord.Embed(description="助けが必要ですか？\n必要な場合は、</help:1140613857224687616> コマンドを実行してください。", color=GREEN)
 	await message.reply(embed=embed)
 
+async def move_success_embed(ctx: commands.Context, channel: discord.VoiceChannel):
+	"""
+	チャンネル移動が成功した際の通知Embedを送信する。
+	"""
+	embed = discord.Embed(
+		title="🚚 チャンネル移動",
+		description=f"**{channel.name}** に移動しました。",
+		color=BLUE
+	)
+	await ctx.send(embed=embed)
+
+async def already_in_channel_embed(ctx: commands.Context):
+	"""
+	移動先が現在のチャンネルと同じ場合の通知Embedを送信する。
+	"""
+	embed = discord.Embed(
+		title="⚠️ 通知",
+		description="既にそのチャンネルに接続しています。",
+		color=YELLOW
+	)
+	await ctx.send(embed=embed)
+
+async def bot_not_in_vc_embed(ctx: commands.Context):
+	"""
+	Botがボイスチャンネルに接続していない場合の通知Embedを送信する。
+	"""
+	embed = discord.Embed(
+		title="❌ エラー",
+		description="Botがボイスチャンネルに接続されていません。",
+		color=RED
+	)
+	await ctx.send(embed=embed)
+
 # --- エラー・警告系Embed ---
 
 async def user_not_here_embed(ctx: commands.Context):

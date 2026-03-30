@@ -152,6 +152,38 @@ async def bot_skip(ctx: commands.Context):
 	except Exception as e:
 		await exception_embed(ctx, "skip", e)
 
+@bot.hybrid_command(name="move", description="Botを自分のいるボイスチャンネルに移動させます。")
+@commands.guild_only()
+async def bot_move(ctx: commands.Context):
+	"""
+	実行者が接続しているボイスチャンネルにBotを移動させるコマンド。
+	"""
+	# 実行者がボイスチャンネルにいない場合の例外処理
+	if not ctx.author.voice:
+		return await user_not_here_embed(ctx)
+
+	# Botがどこにも接続していない場合の例外処理
+	if not ctx.guild.voice_client:
+		return await bot_not_in_vc_embed(ctx)
+
+	# 移動先が現在接続中のチャンネルと同じか判定
+	if ctx.guild.voice_client.channel == ctx.author.voice.channel:
+		return await already_in_channel_embed(ctx)
+
+	try:
+		# ボイスクライアントのチャンネル移動を実行
+		await ctx.guild.voice_client.move_to(ctx.author.voice.channel)
+
+		# ギルドデータの整合性確保
+		from module.music import ensure_guild_data
+		await ensure_guild_data(ctx.guild.id)
+
+		await move_success_embed(ctx, ctx.author.voice.channel)
+	except Exception as e:
+		# 移動失敗時のエラー処理
+		await exception_embed(ctx, "move", e)
+		print(f"{Color.RED}[ERROR]{Color.RESET} move:", e)
+
 @bot.hybrid_command(name="leave", description="BOTを退出させます。")
 @commands.guild_only()
 async def bot_leave(ctx: commands.Context):
