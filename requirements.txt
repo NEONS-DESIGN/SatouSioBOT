@@ -1,4 +1,4 @@
-discord.py==2.7.1
+discord.py[voice]
 yt-dlp[default,curl-cffi]
 yt-dlp-ejs
 yt-dlp-get-pot
