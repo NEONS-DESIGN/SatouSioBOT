@@ -10,7 +10,6 @@ from module.logger import setup_daily_logger, get_bot_logger
 from module.music import play_music, ensure_guild_data, server_music_data
 from module.setting import setup_setting_commands
 from module.sqlite import sql_execution
-from module.cookie_refresh import CookieManager
 
 # 環境変数の読み込み
 load_dotenv()
@@ -21,7 +20,7 @@ setup_daily_logger()
 logger = get_bot_logger()
 
 # discord.py デフォルトのコンソール出力を有効化
-discord.utils.setup_logging(root=False)
+# discord.utils.setup_logging(root=False)
 
 # ==========================================
 # Botクラスの定義 (setup_hookを利用)
@@ -41,28 +40,7 @@ class SatouSioBot(commands.Bot):
 		await self.tree.sync()
 		logger.info("スラッシュコマンドを同期しました。")
 
-		# Cookie自動更新タスクの開始 (忘れずにstartを呼ぶ)
-		auto_cookie_refresh.start()
-
 bot = SatouSioBot()
-cookie_manager = CookieManager()
-
-# ==========================================
-# バックグラウンドタスク
-# ==========================================
-@tasks.loop(hours=24)
-async def auto_cookie_refresh():
-	try:
-		logger.info("Cookieの自動更新処理を開始します...")
-		await cookie_manager.fetch_youtube_cookies()
-		logger.info("Cookieの自動更新が完了しました。")
-	except Exception as e:
-		logger.error(f"Cookie自動更新タスクでエラー発生: {e}")
-
-@auto_cookie_refresh.before_loop
-async def before_cookie_refresh():
-	"""Botの準備が完了するまでタスクの実行を待機する"""
-	await bot.wait_until_ready()
 
 # ==========================================
 # UIコンポーネント

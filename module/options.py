@@ -16,10 +16,11 @@ try:
 except (KeyError, ValueError, configparser.NoSectionError):
 	DATABASE_PATH = "data.db"
 
-try:
-	COOKIE_FILE_PATH = config['MusicBot']['cookie_file_path']
-except (KeyError, ValueError, configparser.NoSectionError):
-	COOKIE_FILE_PATH = "cookies.txt"
+# cookiesファイルの直接読み取りは一旦廃止
+# try:
+# 	COOKIE_FILE_PATH = config['MusicBot']['cookie_file_path']
+# except (KeyError, ValueError, configparser.NoSectionError):
+# 	COOKIE_FILE_PATH = "cookies.txt"
 
 YTDLP_OPTIONS = {
 	'format': 'bestaudio',
@@ -63,6 +64,8 @@ YTDLP_OPTIONS = {
 		'User-Agent': USER_AGENT,
 		'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
 	},
+	# yt-dlpのブラウザクッキー読み込み機能を利用して、Firefoxのクッキーを使用する
+	'cookiesfrombrowser': ('firefox',)
 }
 
 # 動画本体のURLを解析せずメタデータのみ取得
@@ -77,12 +80,15 @@ FAST_META_OPTIONS = {
 	},
 	'headers': {
 		'User-Agent': USER_AGENT,
-	}
+	},
+	# yt-dlpのブラウザクッキー読み込み機能を利用して、Firefoxのクッキーを使用する
+	'cookiesfrombrowser': ('firefox',)
 }
 
-if os.path.exists(COOKIE_FILE_PATH):
-	YTDLP_OPTIONS['cookiefile'] = COOKIE_FILE_PATH
-	FAST_META_OPTIONS['cookiefile'] = COOKIE_FILE_PATH
+# cookiesファイルの直接読み取りは一旦廃止
+# if os.path.exists(COOKIE_FILE_PATH):
+# 	YTDLP_OPTIONS['cookiefile'] = COOKIE_FILE_PATH
+# 	FAST_META_OPTIONS['cookiefile'] = COOKIE_FILE_PATH
 
 FFMPEG_OPTIONS = {
 	"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",

@@ -259,7 +259,7 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 
 		fetch_task = bot.loop.run_in_executor(None, lambda: fast_ytdl.extract_info(search_query, download=False))
 
-		info = await loading_spinner(fetch_task, "高速メタデータ検索")
+		info = await loading_spinner(fetch_task, "メタデータ検索")
 
 		if info is None:
 			raise ValueError("情報の取得に失敗")
@@ -285,10 +285,16 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 			if entry is None: continue
 
 			video_id = entry.get("id")
-			track_url = entry.get("url") or entry.get("webpage_url")
+
+			# 修正: 生のURL(url)より先に、ページURL(webpage_url)を優先して取得する
+			track_url = entry.get("webpage_url") or entry.get("original_url")
 
 			if not track_url and video_id:
 				track_url = f"https://www.youtube.com/watch?v={video_id}"
+
+			# 最終フォールバック
+			if not track_url:
+				track_url = entry.get("url")
 
 			if not track_url:
 				continue
