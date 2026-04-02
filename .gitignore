@@ -163,3 +163,4 @@ temp/
 cookies.txt
 serverData.db
 data.db
+auth/state.json
