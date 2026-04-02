@@ -1,11 +1,11 @@
 discord.py[voice]
 yt-dlp[default,curl-cffi]
 yt-dlp-ejs
-yt-dlp-get-pot
-yt-dlp-getpot-wpc
+# yt-dlp-get-pot
+# yt-dlp-getpot-wpc
 aiosqlite
 python-dotenv
-pyshorteners==1.0.1
+pyshorteners
 aiohttp
 playwright
 PyNaCl
