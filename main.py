@@ -1,3 +1,4 @@
+import asyncio
 import os
 import random
 import discord
@@ -207,13 +208,33 @@ async def bot_leave(ctx: commands.Context):
 	await ctx.defer()
 	try:
 		guild_id = ctx.guild.id
+
+		# ボイスチャンネル退出前に再生中の音楽を明示的に強制停止する
+		if ctx.guild.voice_client.is_playing() or ctx.guild.voice_client.is_paused():
+			ctx.guild.voice_client.stop()
+
 		await ctx.guild.voice_client.disconnect()
 
-		# キューとワーカーのクリーンアップ
+		# ギルド単位のデータを完全破棄する
 		if guild_id in server_music_data:
 			data = server_music_data[guild_id]
+
+			# ワーカータスクの停止
 			if data.get("worker_task") and not data["worker_task"].done():
 				data["worker_task"].cancel()
+
+			# 通常キューのクリア
+			data["queue"].clear()
+
+			# 事前取得キュー(asyncio.Queue)の中身を安全に破棄する
+			while not data["prefetch_queue"].empty():
+				try:
+					data["prefetch_queue"].get_nowait()
+					data["prefetch_queue"].task_done()
+				except asyncio.QueueEmpty:
+					break
+
+			# サーバーの音楽データを辞書から削除する
 			del server_music_data[guild_id]
 
 		await leave_embed(ctx)
@@ -233,6 +254,123 @@ async def bot_purge(ctx: commands.Context, limit: app_commands.Range[int, 1, 50]
 	except Exception as e:
 		await exception_embed(ctx, "purge", e)
 		logger.error(f"purgeコマンド実行エラー: {e}")
+
+@bot.hybrid_command(name="qlist", description="現在のキューに入っている曲のリストを表示します。")
+@commands.guild_only()
+async def bot_qlist(ctx: commands.Context):
+	await ctx.defer()
+	try:
+		await ensure_guild_data(ctx.guild.id, bot)
+		queue = server_music_data[ctx.guild.id]["queue"]
+
+		if not queue:
+			return await empty_queue_embed(ctx)
+
+		# embed.pyで作成したページ生成関数を呼び出し
+		embeds = await queue_list_pages(queue)
+
+		# 1ページしかない場合はそのまま送信、複数ある場合はボタン付きページネーターを使用
+		if len(embeds) == 1:
+			await ctx.send(embed=embeds[0])
+		else:
+			view = SimplePaginator(embeds)
+			await ctx.send(embed=embeds[0], view=view)
+
+	except Exception as e:
+		await exception_embed(ctx, "qlist", e)
+		logger.error(f"qlistコマンド実行エラー: {e}")
+
+@bot.hybrid_command(name="pause", description="現在再生中の曲を一時停止します。")
+@commands.guild_only()
+async def bot_pause(ctx: commands.Context):
+	await ctx.defer()
+	try:
+		vc = ctx.guild.voice_client
+		if not vc or not vc.is_connected():
+			return await bot_not_in_vc_embed(ctx)
+
+		if vc.is_paused():
+			return await already_paused_embed(ctx)
+
+		if vc.is_playing():
+			vc.pause()
+			await pause_embed(ctx)
+		else:
+			await not_playing_embed(ctx)
+	except Exception as e:
+		await exception_embed(ctx, "pause", e)
+		logger.error(f"pauseコマンド実行エラー: {e}")
+
+@bot.hybrid_command(name="resume", description="一時停止中の曲を再開します。")
+@commands.guild_only()
+async def bot_resume(ctx: commands.Context):
+	await ctx.defer()
+	try:
+		vc = ctx.guild.voice_client
+		if not vc or not vc.is_connected():
+			return await bot_not_in_vc_embed(ctx)
+
+		if vc.is_playing():
+			return await already_playing_embed(ctx)
+
+		if vc.is_paused():
+			vc.resume()
+			await resume_embed(ctx)
+		else:
+			await not_playing_embed(ctx)
+	except Exception as e:
+		await exception_embed(ctx, "resume", e)
+		logger.error(f"resumeコマンド実行エラー: {e}")
+
+@bot.hybrid_command(name="clear", description="キューに入っている曲を削除します。")
+@app_commands.describe(start="削除する件数、または削除を開始する番号", end="削除を終了する番号(範囲指定時)")
+@app_commands.rename(start="件数または開始番号", end="終了番号")
+@commands.guild_only()
+async def bot_clear(ctx: commands.Context, start: int = None, end: int = None):
+	await ctx.defer()
+	try:
+		await ensure_guild_data(ctx.guild.id, bot)
+		queue = server_music_data[ctx.guild.id]["queue"]
+
+		if not queue:
+			return await empty_queue_embed(ctx)
+
+		queue_length = len(queue)
+		deleted_count = 0
+
+		if start is None and end is None:
+			# 引数なし: 全部削除
+			deleted_count = len(queue)
+			queue.clear()
+
+		elif start is not None and end is None:
+			# 引数1つ: 先頭から指定された数まで削除
+			if start < 1:
+				return await invalid_clear_range_embed(ctx)
+			delete_end = min(start, queue_length)
+			deleted_count = delete_end
+			del queue[:delete_end]
+
+		elif start is not None and end is not None:
+			# 引数2つ: 範囲削除 (例: /clear 4 8)
+			if start < 1 or end < start:
+				return await invalid_clear_range_embed(ctx)
+
+			# リストは0から始まるため、人間が指定した番号(1〜)をプログラム用のインデックス(0〜)に変換
+			slice_start = start - 1
+			slice_end = min(end, queue_length)
+
+			if slice_start >= queue_length:
+				return await invalid_clear_range_embed(ctx)
+
+			deleted_count = slice_end - slice_start
+			del queue[slice_start:slice_end]
+
+		await clear_queue_embed(ctx, deleted_count)
+
+	except Exception as e:
+		await exception_embed(ctx, "clear", e)
+		logger.error(f"clearコマンド実行エラー: {e}")
 
 if __name__ == "__main__":
 	bot.run(discordToken)

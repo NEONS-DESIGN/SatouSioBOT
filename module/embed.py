@@ -172,3 +172,53 @@ async def limit_range_error_embed(ctx: commands.Context):
 
 async def limit_updated_embed(ctx: commands.Context, target: str, limit: int):
 	await _send_msg(ctx, "✅ 設定更新", f"{target}を **{limit}** 曲に設定しました。", GREEN)
+
+# ==========================================
+# コントロール・キュー操作系Embed
+# ==========================================
+async def pause_embed(ctx: commands.Context):
+	await _send_msg(ctx, "⏸️ 一時停止", "再生を一時停止しました。", YELLOW)
+
+async def resume_embed(ctx: commands.Context):
+	await _send_msg(ctx, "▶️ 再生再開", "再生を再開しました。", GREEN)
+
+async def already_paused_embed(ctx: commands.Context):
+	await _send_msg(ctx, "⚠️ 通知", "既に一時停止中です。", YELLOW)
+
+async def already_playing_embed(ctx: commands.Context):
+	await _send_msg(ctx, "⚠️ 通知", "既に再生中です。", YELLOW)
+
+async def clear_queue_embed(ctx: commands.Context, count: int):
+	await _send_msg(ctx, "🗑️ キュー削除", f"**{count}** 曲をキューから削除しました。", GREEN)
+
+async def invalid_clear_range_embed(ctx: commands.Context):
+	await _send_msg(ctx, "⚠️ 範囲エラー", "正しい数値を指定してください。\n例: `/clear 5` または `/clear 4 8`", YELLOW)
+
+async def queue_list_pages(queue: list) -> list:
+	"""キューのリストをページ分けしたEmbedのリストを生成する"""
+	if not queue:
+		return [discord.Embed(title="📝 キューリスト", description="キューは空です。", color=BLUE)]
+
+	embeds = []
+	tracks_per_page = 10
+	total_pages = (len(queue) - 1) // tracks_per_page + 1
+
+	for i in range(total_pages):
+		embed = discord.Embed(title=f"📝 キューリスト ({i+1}/{total_pages}ページ)", color=BLUE)
+		description = ""
+		start_idx = i * tracks_per_page
+		end_idx = start_idx + tracks_per_page
+
+		for j, track in enumerate(queue[start_idx:end_idx], start=start_idx + 1):
+			title = track.get('title', 'Unknown Title')
+			if len(title) > 45:
+				title = title[:42] + "..."
+
+			duration_raw = track.get('duration', 0)
+			duration = await play_time(duration_raw)
+			description += f"**{j}.** {title} `[{duration}]`\n"
+
+		embed.description = description
+		embeds.append(embed)
+
+	return embeds

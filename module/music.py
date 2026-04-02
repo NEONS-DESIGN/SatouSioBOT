@@ -29,7 +29,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
 		self.display_url = display_url
 
 	@classmethod
-	async def from_track(cls, track: dict, volume: float = 0.5):
+	async def from_track(cls, track: dict, volume: float = 0.25):
 		"""
 		ワーカーによって事前解析されたTrackデータからAudioSourceを生成する。
 		"""
@@ -89,12 +89,12 @@ async def guild_prefetch_worker(guild_id: int, bot: commands.Bot):
 			data["prefetch_queue"].task_done()
 
 		except asyncio.CancelledError:
-			# 変更: 終了ログも装飾して出力
+			# 終了ログも装飾して出力
 			sys.stdout.write(f"{Color.CYAN}[⚙️ WORKER] ギルド {guild_id} のワーカーが終了しました。{Color.RESET}\n")
 			sys.stdout.flush()
 			break
 		except Exception as e:
-			# 変更: 予期せぬ致命的エラーは赤色で出力
+			# 予期せぬ致命的エラーは赤色で出力
 			sys.stdout.write(f"{Color.RED}[⚙️ WORKER FATAL] 予期せぬエラー: {e}{Color.RESET}\n")
 			sys.stdout.flush()
 			await asyncio.sleep(1)
@@ -286,7 +286,7 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 
 			video_id = entry.get("id")
 
-			# 修正: 生のURL(url)より先に、ページURL(webpage_url)を優先して取得する
+			# 生のURL(url)より先に、ページURL(webpage_url)を優先して取得する
 			track_url = entry.get("webpage_url") or entry.get("original_url")
 
 			if not track_url and video_id:
