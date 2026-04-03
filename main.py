@@ -49,6 +49,7 @@ class SimplePaginator(discord.ui.View):
 		super().__init__(timeout=180)
 		self.embeds = embeds
 		self.current_page = 0
+		self.message = None
 		# ページ数が3ページ未満の場合は「最初へ」「最後へ」ボタンをUIから削除する
 		if len(self.embeds) < 3:
 			self.remove_item(self.first_button)
@@ -67,6 +68,18 @@ class SimplePaginator(discord.ui.View):
 		# 画面を更新する直前にボタンの状態を再計算する
 		self._update_button_states()
 		await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
+	async def on_timeout(self):
+		"""タイムアウト(180秒)時に自動で実行される処理"""
+		# View内のすべてのボタン要素を無効化(グレーアウト)する
+		for child in self.children:
+			child.disabled = True
+		# 保持しているメッセージオブジェクトを更新して、無効化状態をDiscord上に反映する
+		if self.message:
+			try:
+				await self.message.edit(view=self)
+			except Exception:
+				# メッセージが既に削除されている場合などのエラーを無視する
+				pass
 	@discord.ui.button(label="◀◀", style=discord.ButtonStyle.primary)
 	async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = 0
@@ -113,7 +126,8 @@ async def bot_help(ctx: commands.Context):
 	try:
 		embeds = help_pages()
 		view = SimplePaginator(embeds)
-		await ctx.send(embed=embeds[0], view=view, ephemeral=True)
+		message = await ctx.send(embed=embeds[0], view=view, ephemeral=True)
+		view.message = message
 	except Exception as e:
 		await exception_embed(ctx, "help", e)
 		logger.error(f"helpコマンド実行エラー: {e}")
@@ -279,7 +293,8 @@ async def bot_qlist(ctx: commands.Context):
 			await ctx.send(embed=embeds[0])
 		else:
 			view = SimplePaginator(embeds)
-			await ctx.send(embed=embeds[0], view=view)
+			message = await ctx.send(embed=embeds[0], view=view)
+			view.message = message
 	except Exception as e:
 		await exception_embed(ctx, "qlist", e)
 		logger.error(f"qlistコマンド実行エラー: {e}")
