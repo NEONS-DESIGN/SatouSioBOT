@@ -1,4 +1,5 @@
 <h1 align="center">SatouSioBOT</h1>
+<p align="center"><img width="140" src="https://raw.githubusercontent.com/NEONS-DESIGN/SatouSioBOT/refs/heads/main/img/logo.png"></p>
 <p align="center">砂糖塩という、Discordの音楽再生Botです。できるだけ起動するだけで使用ができるように制作されています。</p>
 
 <p align="center">
