@@ -14,16 +14,13 @@ class Link(discord.ui.View):
 		self.url = url
 		# 非同期でボタンを追加するためのタスクを作成
 		asyncio.create_task(self.add_short_link_button())
-
 	async def add_short_link_button(self):
 		"""別スレッドでURL短縮を実行し、ボタンを追加する"""
 		api_key = os.getenv("bitly_api")
 		if not api_key:
 			return
-
 		loop = asyncio.get_event_loop()
 		short_url = None
-
 		for i in range(3):  # 最大3回試行
 			try:
 				# pyshortenersは同期ライブラリなのでexecutorで実行してブロックを防ぐ
@@ -55,7 +52,6 @@ async def shorten_url(url: str):
 	# 短いURLはそのまま返却して処理を効率化する
 	if not url or len(url) < 100:
 		return url
-
 	try:
 		s = pyshorteners.Shortener()
 		# 同期ライブラリの実行によるイベントループの停止を回避
@@ -88,26 +84,21 @@ async def get_id(url: str):
 	"""
 	if not url.startswith(("http://", "https://")):
 		return "", "title"
-
 	# YouTube用正規表現 (通常の動画IDは11桁)
 	yt_regex = r'(?:v=|\/)([0-9A-Za-z_-]{11})'
-
 	parsed_url = urlparse(url)
 	domain = parsed_url.netloc
 	path = parsed_url.path
-
 	# YouTube (youtube.com / youtu.be / music.youtube.com)
 	if "youtube.com" in domain or "youtu.be" in domain:
 		match = re.search(yt_regex, url)
 		if match:
 			return match.group(1), "youtube"
-
 	# NicoNico
 	elif "nicovideo.jp" in domain:
 		# /watch/sm12345 の 'sm12345' 部分を抽出
 		vid = path.split("/")[-1]
 		return vid, "niconico"
-
 	# どれにも一致しない場合、とりあえずURLとして扱うかエラー
 	return "", "url"
 
@@ -115,13 +106,10 @@ async def play_time(duration: int):
 	"""秒数を HH:MM:SS または MM:SS 形式に変換"""
 	if not duration:
 		return "00:00"
-
 	td = datetime.timedelta(seconds=duration)
 	total_seconds = int(td.total_seconds())
-
 	h, remainder = divmod(total_seconds, 3600)
 	m, s = divmod(remainder, 60)
-
 	if h > 0:
 		return f"{h:02}:{m:02}:{s:02}"
 	return f"{m:02}:{s:02}"

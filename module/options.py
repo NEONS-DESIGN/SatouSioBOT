@@ -1,26 +1,32 @@
-import os
 import configparser
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
 # config.iniの読み込み
-config = configparser.ConfigParser()
-config.read('config.ini', encoding='utf-8')
+config_file = configparser.ConfigParser()
+config_file.read('config.ini', encoding='utf-8')
 
-try:
-	USER_AGENT = config['MusicBot']['USER_AGENT']
-except (KeyError, configparser.NoSectionError):
-	USER_AGENT = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+# オプションの読み込みとデフォルト値の設定
+class Config:
+	def __init__(self):
+		self.USER_AGENT = self.get_config('USER_AGENT', "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+		self.DATABASE_PATH = self.get_config('database_path', "data.db")
+		self.DEFAULT_VOLUME = self.get_config('default_volume', 0.25, value_type=float)
+		self.DEFAULT_QUEUE_LIMIT = self.get_config('default_queue_limit', 50, value_type=int)
+		self.DEFAULT_PLAYLIST_LIMIT = self.get_config('default_playlist_limit', 10, value_type=int)
+	def get_config(self, key, default, value_type=str):
+		try:
+			if value_type == bool:
+				return config_file.getboolean('MusicBot', key)
+			elif value_type == int:
+				return config_file.getint('MusicBot', key)
+			elif value_type == float:
+				return config_file.getfloat('MusicBot', key)
+			else:
+				return config_file.get('MusicBot', key)
+		except (KeyError, ValueError, configparser.NoSectionError):
+			return default
 
-try:
-	DATABASE_PATH = config['MusicBot']['database_path']
-except (KeyError, ValueError, configparser.NoSectionError):
-	DATABASE_PATH = "data.db"
-
-# cookiesファイルの直接読み取りは一旦廃止
-# try:
-# 	COOKIE_FILE_PATH = config['MusicBot']['cookie_file_path']
-# except (KeyError, ValueError, configparser.NoSectionError):
-# 	COOKIE_FILE_PATH = "cookies.txt"
+app_config = Config()
 
 YTDLP_OPTIONS = {
 	'format': 'bestaudio',
@@ -61,7 +67,7 @@ YTDLP_OPTIONS = {
 	},
 	# HTTPリクエストヘッダーのカスタマイズ
 	'headers': {
-		'User-Agent': USER_AGENT,
+		'User-Agent': Config().USER_AGENT,
 		'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
 	},
 	# yt-dlpのブラウザクッキー読み込み機能を利用して、Firefoxのクッキーを使用する
@@ -79,16 +85,11 @@ FAST_META_OPTIONS = {
 		'nicovideo': {'action_wait_time': 1.0},
 	},
 	'headers': {
-		'User-Agent': USER_AGENT,
+		'User-Agent': Config().USER_AGENT,
 	},
 	# yt-dlpのブラウザクッキー読み込み機能を利用して、Firefoxのクッキーを使用する
 	'cookiesfrombrowser': ('firefox',)
 }
-
-# cookiesファイルの直接読み取りは一旦廃止
-# if os.path.exists(COOKIE_FILE_PATH):
-# 	YTDLP_OPTIONS['cookiefile'] = COOKIE_FILE_PATH
-# 	FAST_META_OPTIONS['cookiefile'] = COOKIE_FILE_PATH
 
 FFMPEG_OPTIONS = {
 	"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",

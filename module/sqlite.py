@@ -2,22 +2,25 @@ import aiosqlite
 import os
 
 from module.logger import get_bot_logger
-from module.options import DATABASE_PATH
+from module.options import app_config
 
 logger = get_bot_logger()
-DB_PATH = DATABASE_PATH
+DB_PATH = app_config.DATABASE_PATH
+VOLUME = app_config.DEFAULT_VOLUME
+QUEUE_LIMIT = app_config.DEFAULT_QUEUE_LIMIT
+PLAYLIST_LIMIT = app_config.DEFAULT_PLAYLIST_LIMIT
 
 async def init_db():
 	"""
 	データベースファイルとテーブルの存在を確認し、
 	構造が古い場合は新しいカラムやテーブルを自動で追加する。
 	"""
-	create_serverData_query = """
+	create_serverData_query = f"""
 	CREATE TABLE IF NOT EXISTS "serverData" (
 		"guild_id" INTEGER PRIMARY KEY UNIQUE NOT NULL,
-		"volume" REAL DEFAULT 0.25,
-		"queue_limit" INTEGER DEFAULT 50,
-		"playlist_limit" INTEGER DEFAULT 10
+		"volume" REAL DEFAULT {VOLUME},
+		"queue_limit" INTEGER DEFAULT {QUEUE_LIMIT},
+		"playlist_limit" INTEGER DEFAULT {PLAYLIST_LIMIT}
 	);
 	"""
 	create_bot_admins_query = """
@@ -32,16 +35,13 @@ async def init_db():
 		async with aiosqlite.connect(DB_PATH) as db:
 			await db.execute(create_serverData_query)
 			await db.execute(create_bot_admins_query)
-
 			# 既存のテーブルに新しいカラムが存在するか確認し、なければ追加する
 			cursor = await db.execute("PRAGMA table_info('serverData');")
 			columns = [row[1] for row in await cursor.fetchall()]
-
 			if "queue_limit" not in columns:
-				await db.execute('ALTER TABLE "serverData" ADD COLUMN "queue_limit" INTEGER DEFAULT 50;')
+				await db.execute(f'ALTER TABLE "serverData" ADD COLUMN "queue_limit" INTEGER DEFAULT {QUEUE_LIMIT};')
 			if "playlist_limit" not in columns:
-				await db.execute('ALTER TABLE "serverData" ADD COLUMN "playlist_limit" INTEGER DEFAULT 10;')
-
+				await db.execute(f'ALTER TABLE "serverData" ADD COLUMN "playlist_limit" INTEGER DEFAULT {PLAYLIST_LIMIT};')
 			await db.commit()
 	except Exception as e:
 		print(f"[SQL ERROR] データベース初期化エラー: {e}")
@@ -66,11 +66,6 @@ async def sql_execution(query: str, params: tuple = ()):
 	# 実行のたびにファイル存在チェックを行い、なければ初期化
 	if not os.path.exists(DB_PATH):
 		await init_db()
-	else:
-		# ファイルが存在してもテーブル構造が古い場合があるため都度チェックさせる
-		# (負荷が気になる場合は、main.pyのon_readyで1回だけinit_db()を呼ぶ設計でも可)
-		await init_db()
-
 	try:
 		async with aiosqlite.connect(DB_PATH) as db:
 			async with db.execute(query, params) as cursor:

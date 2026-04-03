@@ -5,7 +5,7 @@ from module.other import play_time
 
 # カラーコード定数
 RED = Embed.RED
-GREEN = Embed.LIGHT_GREEN
+GREEN = Embed.GREEN
 BLUE = Embed.BLUE
 YELLOW = Embed.YELLOW
 
@@ -22,42 +22,48 @@ def _build_music_embed(ctx: commands.Context, info: dict, embed_title: str) -> d
 	title = info.get('title', 'Unknown Title')
 	url = info.get('webpage_url', info.get('url', ''))
 	thumbnail = info.get('thumbnail')
-
 	embed = discord.Embed(title=embed_title, color=BLUE)
-
 	# タイトルをリンク付きで表示
 	field_value = f"[{title}]({url})"
 	if len(field_value) > 1024: field_value = title[:1024]
-
 	name_label = "プレイリスト名" if "プレイリスト" in embed_title else "タイトル"
 	embed.add_field(name=name_label, value=field_value, inline=False)
-
 	icon_url = ctx.author.display_avatar.url if ctx.author.display_avatar else None
 	embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=icon_url)
-
 	if thumbnail:
 		embed.set_image(url=thumbnail)
-
 	return embed
 
 # ==========================================
 # ヘルプページ生成
 # ==========================================
 def help_pages():
-	"""ヘルプ画面のEmbedリストを生成する。"""
-	embed1 = discord.Embed(title="📖 コマンドヘルプ #1", color=GREEN)
+	"""
+	ヘルプ画面のEmbedリストを生成する。
+	追加されたコマンドを含め、カテゴリごとに3ページに分割して表示する。
+	"""
+	embed1 = discord.Embed(title="📖 コマンドヘルプ #1 (再生・基本操作)", color=GREEN)
 	embed1.add_field(name="/p [URL・タイトル]", value="音楽を再生します（YouTube/ニコニコ/SoundCloud対応）。", inline=False)
+	embed1.add_field(name="/pause", value="再生中の曲を一時停止します。", inline=False)
+	embed1.add_field(name="/resume", value="一時停止中の曲の再生を再開します。", inline=False)
+	embed1.add_field(name="/replay", value="現在再生中の曲を最初から再生し直します。", inline=False)
 	embed1.add_field(name="/skip", value="再生中の曲をスキップします。", inline=False)
-	embed1.add_field(name="/vol [1-200]", value="再生音量を変更し、設定を保存します。", inline=False)
-	embed1.add_field(name="/move", value="BOTを自分のいるボイスチャンネルへ移動させます。", inline=False)
-	embed1.add_field(name="/loop", value="キューのループ再生を切り替えます。", inline=False)
 
-	embed2 = discord.Embed(title="📖 コマンドヘルプ #2", color=GREEN)
+	embed2 = discord.Embed(title="📖 コマンドヘルプ #2 (キュー・音量)", color=GREEN)
+	embed2.add_field(name="/qlist", value="現在のキューに入っている曲のリストを表示します。", inline=False)
+	embed2.add_field(name="/clear [開始] [終了]", value="キューの曲を削除します。引数なしで全件削除、範囲指定も可能です。", inline=False)
+	embed2.add_field(name="/loop", value="キューのループ再生を切り替えます。", inline=False)
 	embed2.add_field(name="/sh", value="キューの中身をシャッフルします。", inline=False)
-	embed2.add_field(name="/leave", value="BOTをボイスチャンネルから退出させ、キューをクリアします。", inline=False)
-	embed2.add_field(name="/purge [件数]", value="チャンネルのメッセージを一括削除します（管理権限が必要）。", inline=False)
+	embed2.add_field(name="/vol [1-200]", value="再生音量を変更し、設定を保存します。", inline=False)
 
-	return [embed1, embed2]
+	embed3 = discord.Embed(title="📖 コマンドヘルプ #3 (BOT管理・設定)", color=GREEN)
+	embed3.add_field(name="/move", value="BOTを自分のいるボイスチャンネルへ移動させます。", inline=False)
+	embed3.add_field(name="/leave", value="BOTをボイスチャンネルから退出させ、キューをクリアします。", inline=False)
+	embed3.add_field(name="/purge [件数]", value="チャンネルのメッセージを一括削除します（管理権限が必要）。", inline=False)
+	embed3.add_field(name="/setting admin [add/remove]", value="BOT操作権限の付与・剥奪を行います。", inline=False)
+	embed3.add_field(name="/setting limit [queue/playlist]", value="上限(キュー・プレイリスト)の設定を行います。", inline=False)
+
+	return [embed1, embed2, embed3]
 
 async def help_mention_embed(message: discord.Message):
 	"""メンション受信時のヘルプ案内通知"""
@@ -93,6 +99,9 @@ async def volume_set_embed(ctx: commands.Context, volume: int):
 
 async def purge_complete_embed(ctx: commands.Context, count: int):
 	await _send_msg(ctx, f"✅ {count} 件のメッセージを削除しました。", color=GREEN, ephemeral=True)
+
+async def replay_embed(ctx: commands.Context):
+	await _send_msg(ctx, "🔄 リプレイ", "現在の曲を最初から再生し直します。", GREEN)
 
 # --- キュー・プレイリスト追加 ---
 async def playlist_added_embed(ctx: commands.Context, info: dict, count: int):
@@ -198,27 +207,21 @@ async def queue_list_pages(queue: list) -> list:
 	"""キューのリストをページ分けしたEmbedのリストを生成する"""
 	if not queue:
 		return [discord.Embed(title="📝 キューリスト", description="キューは空です。", color=BLUE)]
-
 	embeds = []
 	tracks_per_page = 10
 	total_pages = (len(queue) - 1) // tracks_per_page + 1
-
 	for i in range(total_pages):
 		embed = discord.Embed(title=f"📝 キューリスト ({i+1}/{total_pages}ページ)", color=BLUE)
 		description = ""
 		start_idx = i * tracks_per_page
 		end_idx = start_idx + tracks_per_page
-
 		for j, track in enumerate(queue[start_idx:end_idx], start=start_idx + 1):
 			title = track.get('title', 'Unknown Title')
 			if len(title) > 45:
 				title = title[:42] + "..."
-
 			duration_raw = track.get('duration', 0)
 			duration = await play_time(duration_raw)
 			description += f"**{j}.** {title} `[{duration}]`\n"
-
 		embed.description = description
 		embeds.append(embed)
-
 	return embeds

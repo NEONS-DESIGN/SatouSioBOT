@@ -29,7 +29,6 @@ class Embed:
 	BLACK       = 0x000000
 	WHITE       = 0xffffff
 	RED         = 0xff6b6b
-	GREEN       = 0x2ecc71
-	LIGHT_GREEN = 0x1dd1a1
+	GREEN       = 0x1DB954
 	BLUE        = 0x3498DB
 	YELLOW      = 0xf1c40f
