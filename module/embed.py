@@ -43,7 +43,8 @@ def help_pages():
 	追加されたコマンドを含め、カテゴリごとに3ページに分割して表示する。
 	"""
 	embed1 = discord.Embed(title="📖 コマンドヘルプ #1 (再生・基本操作)", color=GREEN)
-	embed1.add_field(name="/p [URL・タイトル]", value="音楽を再生します（YouTube/ニコニコ/SoundCloud対応）。", inline=False)
+	embed1.add_field(name="/help", value="このヘルプ画面を表示します。", inline=False)
+	embed1.add_field(name="/p [URL・タイトル]", value="音楽を再生します（YouTube/ニコニコ/SoundCloudなど対応）。", inline=False)
 	embed1.add_field(name="/pause", value="再生中の曲を一時停止します。", inline=False)
 	embed1.add_field(name="/resume", value="一時停止中の曲の再生を再開します。", inline=False)
 	embed1.add_field(name="/replay", value="現在再生中の曲を最初から再生し直します。", inline=False)
