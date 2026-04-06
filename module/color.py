@@ -28,7 +28,20 @@ class Embed:
 	"""DiscordのEmbed用カラーコード定数群"""
 	BLACK       = 0x000000
 	WHITE       = 0xffffff
-	RED         = 0xff6b6b
-	GREEN       = 0x1DB954
-	BLUE        = 0x3498DB
+	RED         = 0xFF4686
+	GREEN       = 0x00976B
+	BLUE        = 0x1F64E1
 	YELLOW      = 0xf1c40f
+	ORANGE	  	= 0xDC770D
+	PURPLE 		= 0x5045E5
+
+class Bootstrap:
+	"""Bootstrapのカラーコード定数群"""
+	PRIMARY   = 0x007bff
+	SECONDARY = 0x6c757d
+	SUCCESS   = 0x28a745
+	DANGER    = 0xdc3545
+	WARNING   = 0xffc107
+	INFO      = 0x17a2b8
+	LIGHT     = 0xf8f9fa
+	DARK      = 0x343a40
