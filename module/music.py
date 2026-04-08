@@ -18,8 +18,37 @@ fast_ytdl = YoutubeDL(FAST_META_OPTIONS)
 
 logger = get_bot_logger()
 
+class GuildMusicPlayer:
+	def __init__(self, guild_id: int, bot: commands.Bot):
+		self.guild_id = guild_id
+		self.bot = bot
+		self.queue = []
+		self.prefetch_queue = asyncio.Queue()
+		self.loop = False
+		self.current = None
+		self.worker_task = None
+		self.voice_client = None
+
+	def start_worker(self):
+		"""プレフェッチワーカーを起動する"""
+		if self.worker_task is None or self.worker_task.done():
+			self.worker_task = self.bot.loop.create_task(guild_prefetch_worker(self))
+
+	def cleanup(self):
+		"""タスクのキャンセルとキューの破棄を行う"""
+		if self.worker_task and not self.worker_task.done():
+			self.worker_task.cancel()
+		self.queue.clear()
+		while not self.prefetch_queue.empty():
+			try:
+				self.prefetch_queue.get_nowait()
+				self.prefetch_queue.task_done()
+			except asyncio.QueueEmpty:
+				break
+		self.current = None
+
 # サーバーごとの状態管理用辞書
-server_music_data: Dict[int, Dict[str, Any]] = {}
+server_music_data: Dict[int, GuildMusicPlayer] = {}
 
 class YTDLSource(discord.PCMVolumeTransformer):
 	def __init__(self, source: discord.AudioSource, *, data: dict, display_url: str, volume: float = 0.25):
@@ -52,33 +81,40 @@ class YTDLSource(discord.PCMVolumeTransformer):
 			volume=volume
 		)
 
-async def guild_prefetch_worker(guild_id: int, bot: commands.Bot):
+async def guild_prefetch_worker(player: GuildMusicPlayer):
 	"""
 	各ギルドに1つだけ存在するバックグラウンドワーカー。
 	キューから曲を1つずつ取り出し、順番に重い解析（ストリームURLの取得）を行う。
 	"""
-	data = server_music_data[guild_id]
-	sys.stdout.write(f"{Color.CYAN}[⚙️ WORKER] ギルド {guild_id} のプレフェッチワーカーが起動しました。{Color.RESET}\n")
+	sys.stdout.write(f"{Color.CYAN}[⚙️ WORKER] ギルド {player.guild_id} のプレフェッチワーカーが起動しました。{Color.RESET}\n")
 	sys.stdout.flush()
 	while True:
 		try:
-			track = await data["prefetch_queue"].get()
+			track = await player.prefetch_queue.get()
 			if not track.get("stream_url") and not track.get("error"):
-				try:
-					fetch_task = bot.loop.run_in_executor(None, lambda: ytdl.extract_info(track["url"], download=False))
-					info = await loading_spinner(fetch_task, f"音源のロード中: {track['title']}")
-					if 'entries' in info and len(info['entries']) > 0:
-						info = info['entries']
-					track["stream_url"] = info.get('url')
-					track["http_headers"] = info.get('http_headers', {})
-					track["duration"] = info.get("duration", track.get("duration"))
-				except Exception as e:
-					track["error"] = e
+				max_retries = 3
+				for attempt in range(max_retries):
+					try:
+						fetch_task = player.bot.loop.run_in_executor(None, lambda: ytdl.extract_info(track["url"], download=False))
+						info = await loading_spinner(fetch_task, f"音源のロード中: {track['title']} (試行 {attempt+1}/{max_retries})")
+						if 'entries' in info and len(info['entries']) > 0:
+							info = info['entries'][0]
+						track["stream_url"] = info.get('url')
+						track["http_headers"] = info.get('http_headers', {})
+						track["duration"] = info.get("duration", track.get("duration"))
+						break # 成功したらループを抜ける
+					except Exception as e:
+						if attempt == max_retries - 1:
+							track["error"] = e
+						else:
+							sys.stdout.write(f"\r{Color.YELLOW}[!] {track['title']} のロードに失敗。リトライします...{Color.RESET}\n")
+							sys.stdout.flush()
+							await asyncio.sleep(2)
 			track["ready_event"].set()
-			data["prefetch_queue"].task_done()
+			player.prefetch_queue.task_done()
 		except asyncio.CancelledError:
 			# 終了ログも装飾して出力
-			sys.stdout.write(f"{Color.CYAN}[⚙️ WORKER] ギルド {guild_id} のワーカーが終了しました。{Color.RESET}\n")
+			sys.stdout.write(f"{Color.CYAN}[⚙️ WORKER] ギルド {player.guild_id} のワーカーが終了しました。{Color.RESET}\n")
 			sys.stdout.flush()
 			break
 		except Exception as e:
@@ -87,19 +123,14 @@ async def guild_prefetch_worker(guild_id: int, bot: commands.Bot):
 			sys.stdout.flush()
 			await asyncio.sleep(1)
 
-async def ensure_guild_data(guild_id: int, bot: commands.Bot = None):
+async def ensure_guild_data(guild_id: int, bot: commands.Bot = None) -> GuildMusicPlayer:
 	"""指定ギルドのデータ領域とワーカーを初期化する。"""
 	if guild_id not in server_music_data:
-		server_music_data[guild_id] = {
-			"queue": [],
-			"prefetch_queue": asyncio.Queue(),
-			"loop": False,
-			"current": None,
-			"worker_task": None
-		}
-	data = server_music_data[guild_id]
-	if bot and (data["worker_task"] is None or data["worker_task"].done()):
-		data["worker_task"] = bot.loop.create_task(guild_prefetch_worker(guild_id, bot))
+		server_music_data[guild_id] = GuildMusicPlayer(guild_id, bot)
+	player = server_music_data[guild_id]
+	if bot:
+		player.start_worker()
+	return player
 
 async def loading_spinner(task_future: asyncio.Future, message: str = "処理中"):
 	"""
@@ -137,22 +168,23 @@ async def loading_spinner(task_future: asyncio.Future, message: str = "処理中
 async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 	"""キューから次の曲を取得し、再生処理を行う"""
 	guild_id = ctx.guild.id
-	data = server_music_data[guild_id]
+	player_data = server_music_data.get(guild_id)
+	if not player_data: return
+
 	voice_client = ctx.guild.voice_client
-	if data["loop"] and data["current"]:
-		data["current"]["ready_event"].clear()
-		data["queue"].append(data["current"])
-		data["prefetch_queue"].put_nowait(data["current"])
-	if not data["queue"]:
-		data["current"] = None
+	if player_data.loop and player_data.current:
+		player_data.current["ready_event"].clear()
+		player_data.queue.append(player_data.current)
+		player_data.prefetch_queue.put_nowait(player_data.current)
+	if not player_data.queue:
+		player_data.current = None
 		if voice_client and voice_client.is_connected():
 			await voice_client.disconnect()
 		await play_completed_embed(ctx)
-		if data["worker_task"] and not data["worker_task"].done():
-			data["worker_task"].cancel()
+		player_data.cleanup()
 		return
-	next_track = data["queue"].pop(0)
-	data["current"] = next_track
+	next_track = player_data.queue.pop(0)
+	player_data.current = next_track
 	try:
 		if not next_track["ready_event"].is_set():
 			wait_msg = await preparing_audio_embed(ctx)
@@ -172,7 +204,7 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 				logger.error(f"再生時エラー: {error}")
 			asyncio.run_coroutine_threadsafe(play_next_song(ctx, bot), bot.loop)
 		voice_client.play(player, after=after_playing)
-		await music_info_embed(ctx, player, len(data["queue"]))
+		await music_info_embed(ctx, player, len(player_data.queue))
 	except Exception as e:
 		logger.error(f"再生ソース生成エラー: {e}")
 		await playback_error_embed(ctx, next_track.get('title', '不明な曲'))
@@ -214,8 +246,7 @@ async def music_info_embed(ctx: commands.Context, player: YTDLSource, queue_coun
 
 async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 	"""入力値からメタデータを抽出し、キューとワーカーに渡す"""
-	await ensure_guild_data(ctx.guild.id, bot)
-	data = server_music_data[ctx.guild.id]
+	player_data = await ensure_guild_data(ctx.guild.id, bot)
 	is_input_url = url.startswith(('http://', 'https://'))
 	try:
 		search_query = url if is_input_url else f"ytsearch1:{url}"
@@ -233,7 +264,7 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 		is_playlist = 'entries' in info and not search_query.startswith('ytsearch')
 		if is_playlist:
 			entries = entries[:playlist_limit]
-		available_slots = queue_limit - len(data["queue"])
+		available_slots = queue_limit - len(player_data.queue)
 		if available_slots <= 0:
 			raise ValueError(f"キューの最大曲数({queue_limit}曲)に達しているため、これ以上追加できません。")
 		entries = entries[:available_slots]
@@ -264,8 +295,8 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 				"error": None,
 				"ready_event": asyncio.Event()
 			}
-			data["queue"].append(track_data)
-			data["prefetch_queue"].put_nowait(track_data)
+			player_data.queue.append(track_data)
+			player_data.prefetch_queue.put_nowait(track_data)
 			queued_count += 1
 			if not is_playlist:
 				single_info = track_data
@@ -278,6 +309,6 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 	if is_playlist:
 		await playlist_added_embed(ctx, info, queued_count)
 	else:
-		await queue_added_embed(ctx, single_info, len(data["queue"]))
-	if not data["current"] and not ctx.guild.voice_client.is_playing():
+		await queue_added_embed(ctx, single_info, len(player_data.queue))
+	if not player_data.current and not ctx.guild.voice_client.is_playing():
 		bot.loop.create_task(play_next_song(ctx, bot))

@@ -117,6 +117,16 @@ async def on_message(message: discord.Message):
 		await help_mention_embed(message)
 	await bot.process_commands(message)
 
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+	# Bot自身が不意にVCから切断された場合のクリーンアップ処理
+	if member.id == bot.user.id and before.channel is not None and after.channel is None:
+		guild_id = member.guild.id
+		if guild_id in server_music_data:
+			server_music_data[guild_id].cleanup()
+			del server_music_data[guild_id]
+			logger.info(f"[CLEANUP] ギルド {guild_id} からBotが切断されたため、リソースをクリーンアップしました。")
+
 # ==========================================
 # スラッシュコマンド群
 # ==========================================
@@ -142,11 +152,12 @@ async def bot_play(ctx: commands.Context, *, query: str):
 	await ctx.defer()
 	try:
 		if not ctx.guild.voice_client:
-			await ensure_guild_data(ctx.guild.id, bot)
-			server_music_data[ctx.guild.id]["voice_client"] = await ctx.author.voice.channel.connect()
+			player = await ensure_guild_data(ctx.guild.id, bot)
+			player.voice_client = await ctx.author.voice.channel.connect()
 		elif ctx.guild.voice_client.channel != ctx.author.voice.channel:
 			await ctx.guild.voice_client.move_to(ctx.author.voice.channel)
-			server_music_data[ctx.guild.id]["voice_client"] = ctx.guild.voice_client
+			player = await ensure_guild_data(ctx.guild.id, bot)
+			player.voice_client = ctx.guild.voice_client
 
 		await play_music(ctx, query, bot)
 	except Exception as e:
@@ -176,10 +187,9 @@ async def bot_volume(ctx: commands.Context, volume: app_commands.Range[int, 1, 2
 async def bot_loop(ctx: commands.Context):
 	await ctx.defer()
 	try:
-		await ensure_guild_data(ctx.guild.id, bot)
-		data = server_music_data[ctx.guild.id]
-		data["loop"] = not data["loop"]
-		await loop_switch_embed(ctx, "有効" if data["loop"] else "無効")
+		player = await ensure_guild_data(ctx.guild.id, bot)
+		player.loop = not player.loop
+		await loop_switch_embed(ctx, "有効" if player.loop else "無効")
 	except Exception as e:
 		await exception_embed(ctx, "loop", e)
 		logger.error(f"loopコマンド実行エラー: {e}")
@@ -189,8 +199,8 @@ async def bot_loop(ctx: commands.Context):
 async def bot_shuffle(ctx: commands.Context):
 	await ctx.defer()
 	try:
-		await ensure_guild_data(ctx.guild.id, bot)
-		queue = server_music_data[ctx.guild.id]["queue"]
+		player = await ensure_guild_data(ctx.guild.id, bot)
+		queue = player.queue
 		if not queue:
 			return await empty_queue_embed(ctx)
 		random.shuffle(queue)
@@ -244,19 +254,7 @@ async def bot_leave(ctx: commands.Context):
 		await ctx.guild.voice_client.disconnect()
 		# ギルド単位のデータを完全破棄する
 		if guild_id in server_music_data:
-			data = server_music_data[guild_id]
-			# ワーカータスクの停止
-			if data.get("worker_task") and not data["worker_task"].done():
-				data["worker_task"].cancel()
-			data["queue"].clear()
-			# 事前取得キュー(asyncio.Queue)の中身を安全に破棄する
-			while not data["prefetch_queue"].empty():
-				try:
-					data["prefetch_queue"].get_nowait()
-					data["prefetch_queue"].task_done()
-				except asyncio.QueueEmpty:
-					break
-			# サーバーの音楽データを辞書から削除する
+			server_music_data[guild_id].cleanup()
 			del server_music_data[guild_id]
 		await leave_embed(ctx)
 	except Exception as e:
@@ -282,8 +280,8 @@ async def bot_purge(ctx: commands.Context, limit: app_commands.Range[int, 1, 50]
 async def bot_qlist(ctx: commands.Context):
 	await ctx.defer()
 	try:
-		await ensure_guild_data(ctx.guild.id, bot)
-		queue = server_music_data[ctx.guild.id]["queue"]
+		player = await ensure_guild_data(ctx.guild.id, bot)
+		queue = player.queue
 		if not queue:
 			return await empty_queue_embed(ctx)
 		# embed.pyで作成したページ生成関数を呼び出し
@@ -344,8 +342,8 @@ async def bot_resume(ctx: commands.Context):
 async def bot_clear(ctx: commands.Context, start: int = None, end: int = None):
 	await ctx.defer()
 	try:
-		await ensure_guild_data(ctx.guild.id, bot)
-		queue = server_music_data[ctx.guild.id]["queue"]
+		player = await ensure_guild_data(ctx.guild.id, bot)
+		queue = player.queue
 		if not queue:
 			return await empty_queue_embed(ctx)
 		queue_length = len(queue)
@@ -385,16 +383,15 @@ async def bot_replay(ctx: commands.Context):
 		vc = ctx.guild.voice_client
 		if not vc or not vc.is_connected():
 			return await bot_not_in_vc_embed(ctx)
-		await ensure_guild_data(ctx.guild.id, bot)
-		data = server_music_data[ctx.guild.id]
+		player = await ensure_guild_data(ctx.guild.id, bot)
 		# 現在再生中の曲データが存在するか確認
-		if not data.get("current"):
+		if not player.current:
 			return await not_playing_embed(ctx)
 		# 現在の曲をキューの先頭（インデックス0）に挿入し直す
-		current_track = data["current"]
-		data["queue"].insert(0, current_track)
+		current_track = player.current
+		player.queue.insert(0, current_track)
 		# ループ機能による重複追加を回避するため、一時的にcurrentを空にする
-		data["current"] = None
+		player.current = None
 		# 再生を強制停止する（自動的にplay_next_songが発火し、先頭に入れた曲が即座に再生される）
 		vc.stop()
 		await replay_embed(ctx)
