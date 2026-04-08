@@ -256,7 +256,7 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 		# 単一の直接URLの場合は、最初からフル解析(ytdl)を行い二度手間を防ぐ
 		if is_input_url and not is_playlist_url:
 			fetch_task = bot.loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-			info = await loading_spinner(fetch_task, "音源データの直接取得")
+			info = await loading_spinner(fetch_task, "源のロード")
 			if info is None: raise ValueError("情報の取得に失敗")
 			entries = [info]
 			is_playlist = False
