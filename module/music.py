@@ -248,20 +248,31 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 	"""入力値からメタデータを抽出し、キューとワーカーに渡す"""
 	player_data = await ensure_guild_data(ctx.guild.id, bot)
 	is_input_url = url.startswith(('http://', 'https://'))
+	# URLがプレイリストかどうかを判定
+	is_playlist_url = is_input_url and ('list=' in url or 'playlist' in url)
 	try:
 		search_query = url if is_input_url else f"ytsearch1:{url}"
-		fetch_task = bot.loop.run_in_executor(None, lambda: fast_ytdl.extract_info(search_query, download=False))
-		info = await loading_spinner(fetch_task, "メタデータ検索")
-		if info is None:
-			raise ValueError("情報の取得に失敗")
+
+		# 単一の直接URLの場合は、最初からフル解析(ytdl)を行い二度手間を防ぐ
+		if is_input_url and not is_playlist_url:
+			fetch_task = bot.loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+			info = await loading_spinner(fetch_task, "音源データの直接取得")
+			if info is None: raise ValueError("情報の取得に失敗")
+			entries = [info]
+			is_playlist = False
+		else:
+			fetch_task = bot.loop.run_in_executor(None, lambda: fast_ytdl.extract_info(search_query, download=False))
+			info = await loading_spinner(fetch_task, "メタデータ検索")
+			if info is None: raise ValueError("情報の取得に失敗")
+			entries = info.get('entries', [info]) if 'entries' in info else [info]
+			is_playlist = 'entries' in info and not search_query.startswith('ytsearch')
+
 		# DBからキューとプレイリストの上限値を取得。存在しない場合はデフォルト値を使用
 		limits = await sql_execution(f"SELECT queue_limit, playlist_limit FROM serverData WHERE guild_id={ctx.guild.id};")
 		queue_limit = limits[0][0] if limits else app_config.DEFAULT_QUEUE_LIMIT
 		playlist_limit = limits[0][1] if limits else app_config.DEFAULT_PLAYLIST_LIMIT
 
 		queued_count = 0
-		entries = info.get('entries', [info]) if 'entries' in info else [info]
-		is_playlist = 'entries' in info and not search_query.startswith('ytsearch')
 		if is_playlist:
 			entries = entries[:playlist_limit]
 		available_slots = queue_limit - len(player_data.queue)
@@ -295,6 +306,13 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 				"error": None,
 				"ready_event": asyncio.Event()
 			}
+
+			# 単一直接URLの場合は既にストリームURLが取得できているため、ワーカーの処理をスキップさせる
+			if is_input_url and not is_playlist_url:
+				track_data["stream_url"] = entry.get('url')
+				track_data["http_headers"] = entry.get('http_headers', {})
+				track_data["ready_event"].set()
+
 			player_data.queue.append(track_data)
 			player_data.prefetch_queue.put_nowait(track_data)
 			queued_count += 1

@@ -158,7 +158,7 @@ async def bot_play(ctx: commands.Context, *, query: str):
 			await ctx.guild.voice_client.move_to(ctx.author.voice.channel)
 			player = await ensure_guild_data(ctx.guild.id, bot)
 			player.voice_client = ctx.guild.voice_client
-
+		# メイン処理へ。がんばえ～～～～
 		await play_music(ctx, query, bot)
 	except Exception as e:
 		await exception_embed(ctx, "play", e)
