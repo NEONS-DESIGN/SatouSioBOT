@@ -43,7 +43,7 @@ bot = SatouSioBot()
 # ==========================================
 class SimplePaginator(discord.ui.View):
 	def __init__(self, embeds):
-		super().__init__(timeout=180)
+		super().__init__(timeout=120) # タイムアウト時間 (秒)
 		self.embeds = embeds
 		self.current_page = 0
 		self.message = None
@@ -77,7 +77,7 @@ class SimplePaginator(discord.ui.View):
 			except Exception:
 				# メッセージが既に削除されている場合などのエラーを無視する
 				pass
-	@discord.ui.button(label="◀◀", style=discord.ButtonStyle.primary)
+	@discord.ui.button(label="❚◀", style=discord.ButtonStyle.primary)
 	async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = 0
 		await self.update_view(interaction)
@@ -89,7 +89,7 @@ class SimplePaginator(discord.ui.View):
 	async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = (self.current_page + 1) % len(self.embeds)
 		await self.update_view(interaction)
-	@discord.ui.button(label="▶▶", style=discord.ButtonStyle.primary)
+	@discord.ui.button(label="▶❚", style=discord.ButtonStyle.primary)
 	async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = len(self.embeds) - 1
 		await self.update_view(interaction)
