@@ -10,12 +10,8 @@ import sys
 from module.color import Color
 from module.embed import *
 from module.logger import get_bot_logger
-<<<<<<< HEAD
 from module.options import FFMPEG_OPTIONS, app_config
 from module.utils import loading_spinner, shorten_url
-=======
-from module.options import YTDLP_OPTIONS, FFMPEG_OPTIONS, FAST_META_OPTIONS, app_config
->>>>>>> main
 from module.sqlite import sql_execution
 
 logger = get_bot_logger()
@@ -59,21 +55,12 @@ class GuildMusicPlayer:
 		self.current = None
 		self.worker_task = None
 		self.voice_client = None
-<<<<<<< HEAD
 	def start_worker(self) -> None:
 		"""ワーカータスクが未起動または終了済みの場合のみ新規起動する"""
 		if self.worker_task is None or self.worker_task.done():
 			self.worker_task = self.bot.loop.create_task(guild_prefetch_worker(self), name=f"prefetch_worker_{self.guild_id}")
 	def cleanup(self) -> None:
 		"""ワーカーのキャンセルとキューの全破棄を行う"""
-=======
-	def start_worker(self):
-		"""プレフェッチワーカーを起動する"""
-		if self.worker_task is None or self.worker_task.done():
-			self.worker_task = self.bot.loop.create_task(guild_prefetch_worker(self))
-	def cleanup(self):
-		"""タスクのキャンセルとキューの破棄を行う"""
->>>>>>> main
 		if self.worker_task and not self.worker_task.done():
 			self.worker_task.cancel()
 		self.queue.clear()

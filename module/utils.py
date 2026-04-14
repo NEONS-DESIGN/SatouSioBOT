@@ -10,9 +10,7 @@ import aiohttp
 from urllib.parse import urlparse
 from module.color import Color
 
-# =======================================================
 # aiohttp シングルトンセッション (TCPコネクションの使い回し)
-# =======================================================
 _aiohttp_session = None
 
 async def get_session() -> aiohttp.ClientSession:
