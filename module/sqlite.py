@@ -1,5 +1,6 @@
 import aiosqlite
 import os
+import asyncio
 
 from module.logger import get_bot_logger
 from module.options import app_config
@@ -9,6 +10,22 @@ DB_PATH = app_config.DATABASE_PATH
 VOLUME = app_config.DEFAULT_VOLUME
 QUEUE_LIMIT = app_config.DEFAULT_QUEUE_LIMIT
 PLAYLIST_LIMIT = app_config.DEFAULT_PLAYLIST_LIMIT
+
+# =======================================================
+# データベース接続の永続化とスレッドセーフなロック管理
+# =======================================================
+_db_connection = None
+_db_lock = asyncio.Lock()
+
+async def get_db() -> aiosqlite.Connection:
+	"""単一の永続的なデータベースコネクションを取得する"""
+	global _db_connection
+	if _db_connection is None:
+		_db_connection = await aiosqlite.connect(DB_PATH)
+		# 読み書きの並行処理性能を劇的に上げるWALモードを有効化
+		await _db_connection.execute("PRAGMA journal_mode=WAL;")
+		await _db_connection.commit()
+	return _db_connection
 
 async def init_db():
 	"""
@@ -30,14 +47,13 @@ async def init_db():
 		PRIMARY KEY ("guild_id", "user_id")
 	);
 	"""
-
 	try:
-		async with aiosqlite.connect(DB_PATH) as db:
+		db = await get_db()
+		async with _db_lock:
 			await db.execute(create_serverData_query)
 			await db.execute(create_bot_admins_query)
-			# 既存のテーブルに新しいカラムが存在するか確認し、なければ追加する
 			cursor = await db.execute("PRAGMA table_info('serverData');")
-			columns = [row[1] for row in await cursor.fetchall()]
+			columns = [row for row in await cursor.fetchall()]
 			if "queue_limit" not in columns:
 				await db.execute(f'ALTER TABLE "serverData" ADD COLUMN "queue_limit" INTEGER DEFAULT {QUEUE_LIMIT};')
 			if "playlist_limit" not in columns:
@@ -49,30 +65,15 @@ async def init_db():
 async def sql_execution(query: str, params: tuple = ()):
 	"""
 	SQLクエリを実行し、結果をリスト形式で返却する。
-	実行前にDBの初期化状態を確認する。
-
-	Parameters
-	----------
-	query : str
-		実行するSQLクエリ
-	params : tuple
-		クエリに渡すパラメータ
-
-	Returns
-	-------
-	list
-		クエリの実行結果（フェッチデータ）
+	排他制御(Lock)を使用し、高速な永続コネクションを使い回す。
 	"""
-	# 実行のたびにファイル存在チェックを行い、なければ初期化
-	if not os.path.exists(DB_PATH):
-		await init_db()
 	try:
-		async with aiosqlite.connect(DB_PATH) as db:
+		db = await get_db()
+		async with _db_lock:
 			async with db.execute(query, params) as cursor:
 				result = await cursor.fetchall()
 				await db.commit()
 				return result
 	except Exception as e:
-		# クエリ実行失敗時のエラー処理
 		logger.error(f"[SQL ERROR] クエリ実行エラー: {e}")
 		return None
