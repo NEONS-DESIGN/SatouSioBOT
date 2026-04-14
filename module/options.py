@@ -11,9 +11,10 @@ class Config:
 		self.USER_AGENT = self.get_config('USER_AGENT', "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 		self.DATABASE_PATH = self.get_config('database_path', "data.db")
 		self.DEFAULT_VOLUME = self.get_config('default_volume', 0.25, value_type=float)
-		self.DEFAULT_QUEUE_LIMIT = self.get_config('default_queue_limit', 50, value_type=int)
-		self.DEFAULT_PLAYLIST_LIMIT = self.get_config('default_playlist_limit', 10, value_type=int)
+		self.DEFAULT_QUEUE_LIMIT = self.get_config('default_queue_limit', 100, value_type=int)
+		self.DEFAULT_PLAYLIST_LIMIT = self.get_config('default_playlist_limit', 20, value_type=int)
 		self.MAX_RETRIES = self.get_config('max_retries', 3, value_type=int)
+		self.MAX_WORKERS = self.get_config('max_workers', 4, value_type=int)
 	def get_config(self, key, default, value_type=str):
 		try:
 			if value_type == bool:
@@ -94,5 +95,5 @@ FAST_META_OPTIONS = {
 
 FFMPEG_OPTIONS = {
 	"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32",
-	"options": "-threads 2 -vn -sn"
+	"options": "-threads 0 -vn -sn"
 }
