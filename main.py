@@ -35,9 +35,6 @@ discordToken = os.getenv("discord_api")
 setup_daily_logger()
 logger = get_bot_logger()
 
-# discord.py デフォルトのコンソール出力を有効化
-# discord.utils.setup_logging(root=False)
-
 # ==========================================
 # Botクラスの定義 (setup_hookを利用)
 # ==========================================
@@ -61,7 +58,7 @@ bot = SatouSioBot()
 # ==========================================
 class SimplePaginator(discord.ui.View):
 	def __init__(self, embeds):
-		super().__init__(timeout=180)
+		super().__init__(timeout=120) # タイムアウト時間 (秒)
 		self.embeds = embeds
 		self.current_page = 0
 		self.message = None
@@ -95,7 +92,7 @@ class SimplePaginator(discord.ui.View):
 			except Exception:
 				# メッセージが既に削除されている場合などのエラーを無視する
 				pass
-	@discord.ui.button(label="◀◀", style=discord.ButtonStyle.primary)
+	@discord.ui.button(label="❚◀", style=discord.ButtonStyle.primary)
 	async def first_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = 0
 		await self.update_view(interaction)
@@ -107,7 +104,7 @@ class SimplePaginator(discord.ui.View):
 	async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = (self.current_page + 1) % len(self.embeds)
 		await self.update_view(interaction)
-	@discord.ui.button(label="▶▶", style=discord.ButtonStyle.primary)
+	@discord.ui.button(label="▶❚", style=discord.ButtonStyle.primary)
 	async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button):
 		self.current_page = len(self.embeds) - 1
 		await self.update_view(interaction)
@@ -122,7 +119,7 @@ async def on_ready():
 	activity = discord.Activity(type=discord.ActivityType.playing, name="音楽再生BOTです。 /help", url="https://github.com/SatouSio/SatouSioBOT", details="コマンドの使い方は/helpで確認できます。", state="音楽再生中", assets={"large_image": "https://raw.githubusercontent.com/NEONS-DESIGN/SatouSioBOT/refs/heads/main/img/logo.png", "large_text": "SatouSioBOT"})
 	await bot.change_presence(activity=activity, status=discord.Status.online)
 	# loggerで綺麗に出力
-	logger.info(f"[READY] {bot.user.name} (ID: {bot.user.id}) としてログインしました。")
+	logger.info(f"{bot.user.name} (ID: {bot.user.id}) としてログインしました。")
 
 @bot.event
 async def on_message(message: discord.Message):

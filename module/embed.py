@@ -1,7 +1,11 @@
 import discord
 from discord.ext import commands
 from module.color import Embed
+<<<<<<< HEAD
 from module.utils import play_time
+=======
+from module.other import play_time, shorten_url
+>>>>>>> main
 
 # カラーコード定数
 RED = Embed.RED
@@ -12,9 +16,14 @@ YELLOW = Embed.YELLOW
 # ==========================================
 # 共通のEmbed送信ヘルパー（一本化ロジック）
 # ==========================================
-async def _send_msg(ctx: commands.Context, title: str, description: str = None, color: int = GREEN, ephemeral: bool = False) -> discord.Message:
-	"""シンプルなEmbedを生成し送信する内部関数。戻り値としてMessageオブジェクトを返す。"""
+async def _send_msg(ctx: commands.Context, title: str, description: str = None, color: int = GREEN, ephemeral: bool = False, edit_msg: discord.Message = None) -> discord.Message:
+	"""シンプルなEmbedを生成し送信（または編集）する内部関数。戻り値としてMessageオブジェクトを返す。"""
 	embed = discord.Embed(title=title, description=description, color=color)
+	if edit_msg:
+		try:
+			return await edit_msg.edit(embed=embed)
+		except Exception:
+			pass # 削除されていた場合などはスルーして新規送信へフォールバック
 	return await ctx.send(embed=embed, ephemeral=ephemeral)
 
 def _build_music_embed(ctx: commands.Context, info: dict, embed_title: str) -> discord.Embed:
@@ -104,10 +113,16 @@ async def purge_complete_embed(ctx: commands.Context, count: int):
 async def replay_embed(ctx: commands.Context):
 	await _send_msg(ctx, "🔄 リプレイ", "現在の曲を最初から再生し直します。", GREEN)
 
-# --- キュー・プレイリスト追加 ---
-async def playlist_added_embed(ctx: commands.Context, info: dict, count: int):
+# --- キュー・プレイリスト追加・再生 ---
+async def playlist_added_embed(ctx: commands.Context, info: dict, count: int, edit_msg: discord.Message = None):
 	embed = _build_music_embed(ctx, info, "📝 プレイリストをキューに追加")
 	embed.add_field(name="追加曲数", value=f"{count} 曲", inline=True)
+	if edit_msg:
+		try:
+			await edit_msg.edit(embed=embed)
+			return
+		except Exception:
+			pass
 	await ctx.send(embed=embed)
 
 async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int):
@@ -116,6 +131,42 @@ async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int):
 	embed.add_field(name="再生時間", value=duration, inline=True)
 	embed.add_field(name="待機数", value=f"{queue_pos} 曲", inline=True)
 	await ctx.send(embed=embed)
+
+async def music_info_embed(ctx: commands.Context, title: str, display_url: str, duration_raw: int, thumbnail_url: str, queue_count: int, wait_msg: discord.Message = None):
+	"""再生中の曲情報をEmbedで送信する。wait_msgが渡された場合はそれを編集してDiscordの幽霊エラーを防ぐ。"""
+	try:
+		embed = discord.Embed(title="🎵 再生中", color=GREEN)
+		title_str = str(title)
+		shortened = await shorten_url(display_url)
+		if len(title_str) > 100:
+			title_str = title_str[:97] + "..."
+		field_value = f"[{title_str}]({shortened})"
+		if len(field_value) > 1024:
+			field_value = title_str[:1024]
+		embed.add_field(name="タイトル", value=field_value, inline=False)
+		duration = await play_time(duration_raw)
+		embed.add_field(name="再生時間", value=duration, inline=True)
+		embed.add_field(name="待機数", value=f"{queue_count} 曲", inline=True)
+		icon_url = ctx.author.display_avatar.url if ctx.author.display_avatar else None
+		embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=icon_url)
+		if thumbnail_url:
+			embed.set_image(url=thumbnail_url)
+		else:
+			fallback_url = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=1024&auto=format&fit=crop"
+			embed.set_image(url=fallback_url)
+		if wait_msg:
+			try:
+				await wait_msg.edit(embed=embed)
+				return
+			except Exception:
+				pass
+		await ctx.send(embed=embed)
+	except Exception as e:
+		fallback_title = title if title else "Unknown Title"
+		try:
+			await music_info_fallback_embed(ctx, fallback_title)
+		except Exception:
+			pass
 
 # ==========================================
 # エラー・警告系Embed
@@ -147,11 +198,11 @@ async def none_result_embed(ctx: commands.Context):
 async def playback_error_embed(ctx: commands.Context, title: str):
 	await _send_msg(ctx, "⚠️ 再生エラー", f"再生中にエラーが発生しました: {title}\n次の曲へスキップします。", RED)
 
-async def load_error_embed(ctx: commands.Context, error: Exception):
-	await _send_msg(ctx, "⚠️ 読み込みエラー", f"読み込みに失敗しました:\n```py\n{error}\n```", RED)
+async def load_error_embed(ctx: commands.Context, error: Exception, edit_msg: discord.Message = None):
+	await _send_msg(ctx, "⚠️ 読み込みエラー", f"読み込みに失敗しました:\n```py\n{error}\n```", RED, edit_msg=edit_msg)
 
-async def skip_error_embed(ctx: commands.Context, title: str):
-	await _send_msg(ctx, "⚠️ スキップ", f"`{title}` の読み込みに失敗したためスキップします。", RED)
+async def skip_error_embed(ctx: commands.Context, title: str, edit_msg: discord.Message = None):
+	await _send_msg(ctx, "⚠️ スキップ", f"`{title}` の読み込みに失敗したためスキップします。", RED, edit_msg=edit_msg)
 
 async def exception_embed(ctx: commands.Context, command_name: str, error: Exception):
 	await _send_msg(ctx, f"❌ エラーが発生しました ({command_name})", f"管理者にお問い合わせください。\n```py\n{error}\n```", RED)
