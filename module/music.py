@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+from aiocache import Cache, cached
 import discord
 from discord.ext import commands
 from typing import Dict
@@ -9,7 +10,7 @@ from module.color import Color
 from module.embed import *
 from module.logger import get_bot_logger
 from module.options import FFMPEG_OPTIONS, app_config
-from module.other import loading_spinner, shorten_url
+from module.utils import loading_spinner, shorten_url
 from module.sqlite import sql_execution
 
 # ロガーの取得
@@ -30,6 +31,22 @@ def get_process_pool():
 		# 最大3つの別プロセスを立ち上げて並列処理
 		_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=3)
 	return _process_pool
+
+# TTLキャッシュ（有効期限付きメモリ保存）
+# ttl=10800 は3時間（3時間でYouTubeのURLが無効になる前に破棄する）
+@cached(ttl=10800, cache=Cache.MEMORY)
+async def fetch_track_info_with_cache(query: str, is_fast: bool):
+	"""
+	キャッシュを確認し、無ければ別プロセスでyt-dlpを動かして解析する関数。
+	※引数(query, is_fast)の組み合わせが「キャッシュの鍵」になります。
+	"""
+	logger = get_bot_logger()
+	logger.info(f"🔍 [CACHE MISS] 新規取得を実行します: {query}")
+
+	loop = asyncio.get_running_loop()
+	pool = get_process_pool()
+	# 別プロセスに処理を投げて結果を待つ
+	return await loop.run_in_executor(pool, extract_info_process, query, is_fast)
 
 def extract_info_process(query: str, is_fast: bool):
 	"""完全に独立したプロセスで実行される解析関数"""
@@ -254,17 +271,16 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 		wait_msg = await preparing_audio_embed(ctx)
 	pool = get_process_pool() # プロセスプールを取得
 	try:
-		search_query = url if is_input_url else f"ytsearch1:{url}"
-
 		# 単一の直接URLの場合は、最初からフル解析(ytdl)を行い二度手間を防ぐ
 		if is_input_url and not is_playlist_url:
-			fetch_task = bot.loop.run_in_executor(pool, extract_info_process, url, False)
+			fetch_task = fetch_track_info_with_cache(url, False)
 			info = await loading_spinner(fetch_task, "音源の取得")
 			if info is None: raise ValueError("情報の取得に失敗")
 			entries = [info]
 			is_playlist = False
 		else:
-			fetch_task = bot.loop.run_in_executor(pool, extract_info_process, search_query, True)
+			search_query = url if is_input_url else f"ytsearch1:{url}"
+			fetch_task = fetch_track_info_with_cache(search_query, True)
 			info = await loading_spinner(fetch_task, "メタデータ検索")
 			if info is None: raise ValueError("情報の取得に失敗")
 			entries = info.get('entries', [info]) if 'entries' in info else [info]

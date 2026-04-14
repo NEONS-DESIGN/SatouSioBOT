@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from module.color import Embed
-from module.other import play_time
+from module.utils import play_time
 
 # カラーコード定数
 RED = Embed.RED

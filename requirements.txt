@@ -5,12 +5,13 @@ yt-dlp-ejs
 # yt-dlp-getpot-wpc
 aiosqlite
 aiohttp
+aiocache
 python-dotenv
 pyshorteners
 playwright
 PyNaCl
 
-# 高速化ライブラリ
+# 高速化ライブラリ (無くても動く)
 winloop #Windowsの場合
 #uvloop #Unix系OSの場合
 aiodns
