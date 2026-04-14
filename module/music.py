@@ -172,38 +172,6 @@ async def ensure_guild_data(guild_id: int, bot: commands.Bot = None) -> GuildMus
 		player.start_worker()
 	return player
 
-<<<<<<< HEAD
-=======
-async def loading_spinner(task_future: asyncio.Future, message: str = "処理中"):
-	"""
-	コンソール用ローディングアニメーション。
-	タスクの完了を待機し、結果を返す。エラー時は失敗を表示して例外を投げる。
-	"""
-	spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
-	colors = itertools.cycle([Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA])
-	clear_line = ' ' * 150
-	try:
-		while not task_future.done():
-			sys.stdout.write(f"\r{next(colors)}[{next(spinner)}] {message}...{Color.RESET}")
-			sys.stdout.flush()
-			await asyncio.sleep(0.1)
-		sys.stdout.write(f"\r{clear_line}")
-		result = task_future.result()
-		sys.stdout.write(f"\r{Color.GREEN}[✓] {message} 完了!{Color.RESET}\n")
-		sys.stdout.flush()
-		return result
-	except asyncio.CancelledError:
-		sys.stdout.write(f"\r{clear_line}")
-		sys.stdout.write(f"\r{Color.YELLOW}[!] {message} キャンセルされました{Color.RESET}\n")
-		sys.stdout.flush()
-		raise
-	except Exception as e:
-		sys.stdout.write(f"\r{clear_line}")
-		sys.stdout.write(f"\r{Color.RED}[✗] {message} 失敗: {e}{Color.RESET}\n")
-		sys.stdout.flush()
-		raise e
-
->>>>>>> main
 async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 	guild_id = ctx.guild.id
 	player_data = server_music_data.get(guild_id)
@@ -234,15 +202,11 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 				wait_msg = await preparing_audio_embed(ctx)
 			await next_track["ready_event"].wait()
 		if next_track.get("error"):
-<<<<<<< HEAD
 			if wait_msg:
 				try:
 					await wait_msg.delete()
 				except Exception: pass
 			await skip_error_embed(ctx, next_track['title'])
-=======
-			await skip_error_embed(ctx, next_track['title'], edit_msg=wait_msg)
->>>>>>> main
 			return await play_next_song(ctx, bot)
 		guild_vol = await sql_execution("SELECT volume FROM serverData WHERE guild_id=?;", (guild_id,))
 		vol = guild_vol[0][0] if guild_vol else app_config.DEFAULT_VOLUME
@@ -252,26 +216,12 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 				logger.error(f"再生時エラー: {error}")
 			asyncio.run_coroutine_threadsafe(play_next_song(ctx, bot), bot.loop)
 		voice_client.play(player, after=after_playing)
-<<<<<<< HEAD
 		await music_info_embed(ctx, player, len(player_data.queue), wait_msg)
-=======
-		# embed.py の music_info_embed にデータを渡してUIを生成させる
-		await music_info_embed(
-			ctx=ctx,
-			title=player.title,
-			display_url=player.display_url,
-			duration_raw=player.data.get('duration', 0),
-			thumbnail_url=player.data.get("thumbnail"),
-			queue_count=len(player_data.queue),
-			wait_msg=wait_msg
-		)
->>>>>>> main
 	except Exception as e:
 		logger.error(f"再生ソース生成エラー: {e}")
 		await playback_error_embed(ctx, next_track.get('title', '不明な曲'))
 		await play_next_song(ctx, bot)
 
-<<<<<<< HEAD
 async def music_info_embed(ctx: commands.Context, player: YTDLSource, queue_count: int, wait_msg: discord.Message = None):
 	try:
 		embed = discord.Embed(title="🎵 再生中", color=Embed.GREEN)
@@ -310,8 +260,6 @@ async def music_info_embed(ctx: commands.Context, player: YTDLSource, queue_coun
 		except Exception:
 			pass
 
-=======
->>>>>>> main
 async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 	player_data = await ensure_guild_data(ctx.guild.id, bot)
 	is_input_url = url.startswith(('http://', 'https://'))
@@ -321,15 +269,9 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 	if is_playing_immediately:
 		wait_msg = await preparing_audio_embed(ctx)
 	try:
-<<<<<<< HEAD
 		if is_input_url and not is_playlist_url:
 			fetch_coro = fetch_track_info_with_cache(url, False)
 			fetch_task = asyncio.create_task(fetch_coro)
-=======
-		search_query = url if is_input_url else f"ytsearch1:{url}"
-		if is_input_url and not is_playlist_url:
-			fetch_task = bot.loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
->>>>>>> main
 			info = await loading_spinner(fetch_task, "音源の取得")
 			if info is None: raise ValueError("情報の取得に失敗")
 			entries = [info]
@@ -342,11 +284,7 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 			if info is None: raise ValueError("情報の取得に失敗")
 			entries = info.get('entries', [info]) if 'entries' in info else [info]
 			is_playlist = 'entries' in info and not search_query.startswith('ytsearch')
-<<<<<<< HEAD
 		limits = await sql_execution("SELECT queue_limit, playlist_limit FROM serverData WHERE guild_id=?;", (ctx.guild.id,))
-=======
-		limits = await sql_execution(f"SELECT queue_limit, playlist_limit FROM serverData WHERE guild_id={ctx.guild.id};")
->>>>>>> main
 		queue_limit = limits[0][0] if limits else app_config.DEFAULT_QUEUE_LIMIT
 		playlist_limit = limits[0][1] if limits else app_config.DEFAULT_PLAYLIST_LIMIT
 		queued_count = 0
@@ -380,21 +318,14 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 				"http_headers": {},
 				"error": None,
 				"ready_event": asyncio.Event(),
-<<<<<<< HEAD
 				"wait_msg": wait_msg if not is_playlist else None,
 				"is_fetching": False # 重複取得防止フラグ
-=======
-				"wait_msg": wait_msg if not is_playlist else None
->>>>>>> main
 			}
 			if is_input_url and not is_playlist_url:
 				track_data["stream_url"] = entry.get('url')
 				track_data["http_headers"] = entry.get('http_headers', {})
 				track_data["ready_event"].set()
-<<<<<<< HEAD
 				track_data["is_fetching"] = True
-=======
->>>>>>> main
 			player_data.queue.append(track_data)
 			player_data.queue_updated_event.set() # ワーカーを起動/再開させる
 			queued_count += 1
