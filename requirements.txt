@@ -13,3 +13,4 @@ PyNaCl
 winloop #Windowsの場合
 #uvloop #Unix系OSの場合
 aiodns
+Brotli

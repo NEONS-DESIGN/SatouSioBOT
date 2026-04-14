@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import concurrent.futures
 from aiocache import Cache, cached
 import discord
@@ -64,7 +65,7 @@ class GuildMusicPlayer:
 	def __init__(self, guild_id: int, bot: commands.Bot):
 		self.guild_id = guild_id
 		self.bot = bot
-		self.queue = []
+		self.queue = collections.deque()
 		self.prefetch_queue = asyncio.Queue()
 		self.loop = False
 		self.current = None
@@ -190,7 +191,7 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 		await play_completed_embed(ctx)
 		player_data.cleanup()
 		return
-	next_track = player_data.queue.pop(0)
+	next_track = player_data.queue.popleft()
 	player_data.current = next_track
 	try:
 		if not next_track["ready_event"].is_set():
@@ -203,7 +204,7 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 		if next_track.get("error"):
 			await skip_error_embed(ctx, next_track['title'])
 			return await play_next_song(ctx, bot)
-		guild_vol = await sql_execution(f"SELECT volume FROM serverData WHERE guild_id={guild_id};")
+		guild_vol = await sql_execution(f"SELECT volume FROM serverData WHERE guild_id=?;", (guild_id,))
 		vol = guild_vol[0][0] if guild_vol else app_config.DEFAULT_VOLUME
 		player = await YTDLSource.from_track(next_track, volume=vol)
 		def after_playing(error):
@@ -287,7 +288,7 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 			is_playlist = 'entries' in info and not search_query.startswith('ytsearch')
 
 		# DBからキューとプレイリストの上限値を取得。存在しない場合はデフォルト値を使用
-		limits = await sql_execution(f"SELECT queue_limit, playlist_limit FROM serverData WHERE guild_id={ctx.guild.id};")
+		limits = await sql_execution(f"SELECT queue_limit, playlist_limit FROM serverData WHERE guild_id=?;", (ctx.guild.id,))
 		queue_limit = limits[0][0] if limits else app_config.DEFAULT_QUEUE_LIMIT
 		playlist_limit = limits[0][1] if limits else app_config.DEFAULT_PLAYLIST_LIMIT
 

@@ -213,16 +213,16 @@ async def queue_list_pages(queue: list) -> list:
 	total_pages = (len(queue) - 1) // tracks_per_page + 1
 	for i in range(total_pages):
 		embed = discord.Embed(title=f"📝 キューリスト ({i+1}/{total_pages}ページ)", color=BLUE)
-		description = ""
+		description_lines = []
 		start_idx = i * tracks_per_page
 		end_idx = start_idx + tracks_per_page
 		for j, track in enumerate(queue[start_idx:end_idx], start=start_idx + 1):
 			title = track.get('title', 'Unknown Title')
-			if len(title) > 45:
-				title = title[:42] + "..."
-			duration_raw = track.get('duration', 0)
-			duration = await play_time(duration_raw)
-			description += f"**{j}.** {title} `[{duration}]`\n"
-		embed.description = description
+			if len(title) > 45: title = title[:42] + "..."
+			duration = await play_time(track.get('duration', 0))
+			# リストに追加する
+			description_lines.append(f"**{j}.** {title} `[{duration}]`")
+		# 最後に改行で一気に結合する
+		embed.description = "\n".join(description_lines)
 		embeds.append(embed)
 	return embeds

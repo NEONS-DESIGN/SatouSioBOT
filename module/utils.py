@@ -68,30 +68,18 @@ class Link(discord.ui.View):
 
 async def shorten_url(url: str):
 	"""
-	URLの文字列長が一定（100文字）を超える場合、短縮URLを生成して返却する。
-	APIキー不要のTinyURLを使用し、同期処理を非同期スレッドで実行する。
-
-	Parameters
-	----------
-	url : str
-		短縮対象のURL
-
-	Returns
-	-------
-	str
-		短縮されたURL、またはエラー・短尺時のオリジナルURL
+	aiohttpを使用して完全非同期でTinyURL APIを叩き、URLを短縮する。
 	"""
-	# 短いURLはそのまま返却して処理を効率化する
 	if not url or len(url) < 100:
 		return url
+	api_url = f"https://tinyurl.com/api-create.php?url={url}"
 	try:
-		s = pyshorteners.Shortener()
-		# 同期ライブラリの実行によるイベントループの停止を回避
-		# TinyURLはAPIキーなしで利用可能
-		short_url = await asyncio.to_thread(s.tinyurl.short, url)
-		return short_url
+		async with aiohttp.ClientSession() as session:
+			async with session.get(api_url) as response:
+				if response.status == 200:
+					return await response.text()
+		return url
 	except Exception as e:
-		# 短縮失敗時はオリジナルのURLを返却し、処理を継続させる
 		print(f"{Color.RED}[ERROR]{Color.RESET} URL短縮に失敗しました: {e}")
 		return url
 
@@ -123,8 +111,7 @@ async def get_id(url: str):
 	path = parsed_url.path
 	# YouTube (youtube.com / youtu.be / music.youtube.com)
 	if "youtube.com" in domain or "youtu.be" in domain:
-		match = re.search(yt_regex, url)
-		if match:
+		if match := re.search(yt_regex, url):
 			return match.group(1), "youtube"
 	# NicoNico
 	elif "nicovideo.jp" in domain:
@@ -138,9 +125,7 @@ async def play_time(duration: int):
 	"""秒数を HH:MM:SS または MM:SS 形式に変換"""
 	if not duration:
 		return "00:00"
-	td = datetime.timedelta(seconds=duration)
-	total_seconds = int(td.total_seconds())
-	h, remainder = divmod(total_seconds, 3600)
+	h, remainder = divmod(duration, 3600)
 	m, s = divmod(remainder, 60)
 	if h > 0:
 		return f"{h:02}:{m:02}:{s:02}"
