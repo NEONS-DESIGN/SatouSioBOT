@@ -63,8 +63,8 @@ YTDLP_OPTIONS = {
 	'source_address': '0.0.0.0',
 	'force_ipv4': True,
 	'extractor_args': {
-		'youtube': {'player_client': ['web_music', 'android']},
-		'nicovideo': {'action_wait_time': 1.0},
+		'youtube': {'player_client': ['web_music, android']},
+		'nicovideo': {'action_wait_time': ['1.0']},
 	},
 	# HTTPリクエストヘッダーのカスタマイズ
 	'headers': {
@@ -82,8 +82,8 @@ FAST_META_OPTIONS = {
 	'no_warnings': True,
 	'default_search': 'ytsearch',
 	'extractor_args': {
-		'youtube': {'player_client': ['web_music', 'android']},
-		'nicovideo': {'action_wait_time': 1.0},
+		'youtube': {'player_client': ['web_music, android']},
+		'nicovideo': {'action_wait_time': ['1.0']},
 	},
 	'headers': {
 		'User-Agent': app_config.USER_AGENT,

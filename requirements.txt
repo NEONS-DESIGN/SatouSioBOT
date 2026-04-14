@@ -12,5 +12,5 @@ PyNaCl
 # 高速化ライブラリ (無くても動く)
 winloop #Windowsの場合
 #uvloop #Unix系OSの場合
-aiodns
+# aiodns # python 3.12以降はエラーが出る
 Brotli

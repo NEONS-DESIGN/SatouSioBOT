@@ -11,9 +11,7 @@ VOLUME = app_config.DEFAULT_VOLUME
 QUEUE_LIMIT = app_config.DEFAULT_QUEUE_LIMIT
 PLAYLIST_LIMIT = app_config.DEFAULT_PLAYLIST_LIMIT
 
-# =======================================================
 # データベース接続の永続化とスレッドセーフなロック管理
-# =======================================================
 _db_connection = None
 _db_lock = asyncio.Lock()
 
