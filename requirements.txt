@@ -1,8 +1,6 @@
 discord.py[voice,speed]
 yt-dlp[default,curl-cffi]
 yt-dlp-ejs
-# yt-dlp-get-pot
-# yt-dlp-getpot-wpc
 aiosqlite
 aiohttp
 aiocache
