@@ -94,5 +94,5 @@ FAST_META_OPTIONS = {
 
 FFMPEG_OPTIONS = {
 	"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32",
-	"options": "-threads 4 -vn"
+	"options": "-threads 2 -vn -sn"
 }
