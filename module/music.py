@@ -64,13 +64,7 @@ class GuildMusicPlayer:
 		if self.worker_task and not self.worker_task.done():
 			self.worker_task.cancel()
 		self.queue.clear()
-		# asyncio.Queueの残留タスクを全て消化してロックを解放する
-		while not self.prefetch_queue.empty():
-			try:
-				self.prefetch_queue.get_nowait()
-				self.prefetch_queue.task_done()
-			except asyncio.QueueEmpty:
-				break
+		self.queue_updated_event.clear()
 		self.current = None
 
 server_music_data: Dict[int, GuildMusicPlayer] = {}
