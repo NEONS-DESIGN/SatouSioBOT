@@ -68,7 +68,7 @@ YTDLP_OPTIONS = {
 	},
 	# HTTPリクエストヘッダーのカスタマイズ
 	'headers': {
-		'User-Agent': Config().USER_AGENT,
+		'User-Agent': app_config.USER_AGENT,
 		'Accept-Language': 'ja,en-US;q=0.9,en;q=0.8',
 	},
 	# yt-dlpのブラウザクッキー読み込み機能を利用して、Firefoxのクッキーを使用する
@@ -86,7 +86,7 @@ FAST_META_OPTIONS = {
 		'nicovideo': {'action_wait_time': 1.0},
 	},
 	'headers': {
-		'User-Agent': Config().USER_AGENT,
+		'User-Agent': app_config.USER_AGENT,
 	},
 	# yt-dlpのブラウザクッキー読み込み機能を利用して、Firefoxのクッキーを使用する
 	'cookiesfrombrowser': ('firefox',)
