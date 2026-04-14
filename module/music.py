@@ -191,42 +191,37 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 		await play_completed_embed(ctx)
 		player_data.cleanup()
 		return
-	next_track = player_data.queue.popleft()
+	next_track = player_data.queue.pop(0)
 	player_data.current = next_track
 	try:
+		wait_msg = next_track.get("wait_msg")
 		if not next_track["ready_event"].is_set():
-			wait_msg = await preparing_audio_embed(ctx)
+			if not wait_msg:
+				wait_msg = await preparing_audio_embed(ctx)
 			await next_track["ready_event"].wait()
-			try:
-				await wait_msg.delete()
-			except discord.NotFound:
-				pass
 		if next_track.get("error"):
+			if wait_msg:
+				try:
+					await wait_msg.delete()
+				except Exception: pass
 			await skip_error_embed(ctx, next_track['title'])
 			return await play_next_song(ctx, bot)
-		guild_vol = await sql_execution(f"SELECT volume FROM serverData WHERE guild_id=?;", (guild_id,))
-		vol = guild_vol[0][0] if guild_vol else app_config.DEFAULT_VOLUME
+		guild_vol = await sql_execution(f"SELECT volume FROM serverData WHERE guild_id={guild_id};")
+		vol = guild_vol if guild_vol else app_config.DEFAULT_VOLUME
 		player = await YTDLSource.from_track(next_track, volume=vol)
 		def after_playing(error):
 			if error:
 				logger.error(f"再生時エラー: {error}")
 			asyncio.run_coroutine_threadsafe(play_next_song(ctx, bot), bot.loop)
 		voice_client.play(player, after=after_playing)
-		await music_info_embed(
-			ctx=ctx,
-			title=player.title,
-			display_url=player.display_url,
-			duration_raw=player.data.get('duration', 0),
-			thumbnail_url=player.data.get("thumbnail"),
-			queue_count=len(player_data.queue),
-			wait_msg=wait_msg
-		)
+		await music_info_embed(ctx, player, len(player_data.queue), wait_msg)
+
 	except Exception as e:
 		logger.error(f"再生ソース生成エラー: {e}")
 		await playback_error_embed(ctx, next_track.get('title', '不明な曲'))
 		await play_next_song(ctx, bot)
 
-async def music_info_embed(ctx: commands.Context, player: YTDLSource, queue_count: int):
+async def music_info_embed(ctx: commands.Context, player: YTDLSource, queue_count: int, wait_msg: discord.Message = None):
 	"""再生中の曲情報をEmbedで送信する"""
 	try:
 		embed = discord.Embed(title="🎵 再生中", color=Embed.GREEN)
@@ -247,11 +242,16 @@ async def music_info_embed(ctx: commands.Context, player: YTDLSource, queue_coun
 		thumbnail_url = player.data.get("thumbnail")
 		if thumbnail_url:
 			embed.set_image(url=thumbnail_url)
-			await ctx.send(embed=embed)
 		else:
 			fallback_url = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=1024&auto=format&fit=crop"
 			embed.set_image(url=fallback_url)
-			await ctx.send(embed=embed)
+		if wait_msg:
+			try:
+				await wait_msg.edit(embed=embed)
+				return
+			except Exception:
+				pass
+		await ctx.send(embed=embed)
 	except Exception as e:
 		logger.error(f"Embed表示エラー: {e}")
 		fallback_title = player.title if player and player.title else "Unknown Title"
@@ -324,7 +324,8 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 				"stream_url": None,
 				"http_headers": {},
 				"error": None,
-				"ready_event": asyncio.Event()
+				"ready_event": asyncio.Event(),
+				"wait_msg": wait_msg if not is_playlist else None
 			}
 
 			# 単一直接URLの場合は既にストリームURLが取得できているため、ワーカーの処理をスキップさせる
