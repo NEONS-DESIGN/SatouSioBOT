@@ -1,7 +1,9 @@
 import datetime
+import itertools
 import os
 import re
 import asyncio
+import sys
 import discord
 import pyshorteners
 import aiohttp
@@ -113,3 +115,33 @@ async def play_time(duration: int):
 	if h > 0:
 		return f"{h:02}:{m:02}:{s:02}"
 	return f"{m:02}:{s:02}"
+
+async def loading_spinner(task_future: asyncio.Future, message: str = "処理中"):
+	"""
+	コンソール用ローディングアニメーション。
+	タスクの完了を待機し、結果を返す。エラー時は失敗を表示して例外を投げる。
+	"""
+	spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+	colors = itertools.cycle([Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA])
+	clear_line = ' ' * 150
+	try:
+		while not task_future.done():
+			sys.stdout.write(f"\r{next(colors)}[{next(spinner)}] {message}...{Color.RESET}")
+			sys.stdout.flush()
+			# I/O負荷次第で調整 (0.2秒ごとに更新)
+			await asyncio.sleep(0.2)
+		sys.stdout.write(f"\r{clear_line}")
+		result = task_future.result()
+		sys.stdout.write(f"\r{Color.GREEN}[✓] {message} 完了!{Color.RESET}\n")
+		sys.stdout.flush()
+		return result
+	except asyncio.CancelledError:
+		sys.stdout.write(f"\r{clear_line}")
+		sys.stdout.write(f"\r{Color.YELLOW}[!] {message} キャンセルされました{Color.RESET}\n")
+		sys.stdout.flush()
+		raise
+	except Exception as e:
+		sys.stdout.write(f"\r{clear_line}")
+		sys.stdout.write(f"\r{Color.RED}[✗] {message} 失敗: {e}{Color.RESET}\n")
+		sys.stdout.flush()
+		raise e

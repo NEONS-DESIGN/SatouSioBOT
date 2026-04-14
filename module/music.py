@@ -1,22 +1,47 @@
 import asyncio
+import concurrent.futures
 import discord
 from discord.ext import commands
-from yt_dlp import YoutubeDL
-from typing import Dict, Any
+from typing import Dict
 import sys
-import itertools
 
 from module.color import Color
 from module.embed import *
 from module.logger import get_bot_logger
-from module.options import YTDLP_OPTIONS, FFMPEG_OPTIONS, FAST_META_OPTIONS, app_config
-from module.other import play_time, shorten_url
+from module.options import FFMPEG_OPTIONS, app_config
+from module.other import loading_spinner, shorten_url
 from module.sqlite import sql_execution
 
-ytdl = YoutubeDL(YTDLP_OPTIONS)
-fast_ytdl = YoutubeDL(FAST_META_OPTIONS)
-
+# ロガーの取得
 logger = get_bot_logger()
+
+# プロセスプールとワーカー用のキャッシュ設定（ノイズ対策）
+_process_pool = None
+# 別プロセス内でyt-dlpを使い回すためのキャッシュ（起動の高速化）
+_ytdl_cache = {}
+
+def get_process_pool():
+	"""
+	プロセスプールを安全に取得する。
+	別プロセスに処理を逃がすことで、PythonのGIL（排他ロック）を回避する。
+	"""
+	global _process_pool
+	if _process_pool is None:
+		# 最大3つの別プロセスを立ち上げて並列処理
+		_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=3)
+	return _process_pool
+
+def extract_info_process(query: str, is_fast: bool):
+	"""完全に独立したプロセスで実行される解析関数"""
+	from yt_dlp import YoutubeDL
+	from module.options import YTDLP_OPTIONS, FAST_META_OPTIONS
+
+	cache_key = 'fast' if is_fast else 'normal'
+	# そのプロセス内で初めて呼ばれた時だけインスタンスを生成する
+	if cache_key not in _ytdl_cache:
+		opts = FAST_META_OPTIONS if is_fast else YTDLP_OPTIONS
+		_ytdl_cache[cache_key] = YoutubeDL(opts)
+	return _ytdl_cache[cache_key].extract_info(query, download=False)
 
 class GuildMusicPlayer:
 	def __init__(self, guild_id: int, bot: commands.Bot):
@@ -30,12 +55,10 @@ class GuildMusicPlayer:
 		self.voice_client = None
 
 	def start_worker(self):
-		"""プレフェッチワーカーを起動する"""
 		if self.worker_task is None or self.worker_task.done():
 			self.worker_task = self.bot.loop.create_task(guild_prefetch_worker(self))
 
 	def cleanup(self):
-		"""タスクのキャンセルとキューの破棄を行う"""
 		if self.worker_task and not self.worker_task.done():
 			self.worker_task.cancel()
 		self.queue.clear()
@@ -57,10 +80,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
 		self.title = data.get('title', 'Unknown Title')
 		self.display_url = display_url
 	@classmethod
-	async def from_track(cls, track: dict, volume: float = 0.25):
-		"""
-		ワーカーによって事前解析されたTrackデータからAudioSourceを生成する。
-		"""
+	async def from_track(cls, track: dict, volume: float = 0.25): #ワーカーによって事前解析されたTrackデータからAudioSourceを生成する。
 		filename = track.get('stream_url')
 		if not filename:
 			raise ValueError("ストリームURLが存在しません。")
@@ -84,25 +104,28 @@ class YTDLSource(discord.PCMVolumeTransformer):
 async def guild_prefetch_worker(player: GuildMusicPlayer):
 	"""
 	各ギルドに1つだけ存在するバックグラウンドワーカー。
-	キューから曲を1つずつ取り出し、順番に重い解析（ストリームURLの取得）を行う。
+	キューから曲を1つずつ取り出し、順番にストリームURLの取得を行う。
 	"""
 	sys.stdout.write(f"{Color.CYAN}[⚙️ WORKER] ギルド {player.guild_id} のプレフェッチワーカーが起動しました。{Color.RESET}\n")
 	sys.stdout.flush()
+	pool = get_process_pool() # プロセスプールを取得
 	while True:
 		try:
 			track = await player.prefetch_queue.get()
 			if not track.get("stream_url") and not track.get("error"):
-				max_retries = 3
+				# 再取得試行回数 (デフォルトは3回)
+				max_retries = app_config.MAX_RETRIES
+				# 指定の試行回数まで取得できるまで繰り返す。
 				for attempt in range(max_retries):
 					try:
-						fetch_task = player.bot.loop.run_in_executor(None, lambda: ytdl.extract_info(track["url"], download=False))
+						fetch_task = player.bot.loop.run_in_executor(pool, extract_info_process, track["url"], False)
 						info = await loading_spinner(fetch_task, f"音源のロード中: {track['title']} (試行 {attempt+1}/{max_retries})")
 						if 'entries' in info and len(info['entries']) > 0:
 							info = info['entries'][0]
 						track["stream_url"] = info.get('url')
 						track["http_headers"] = info.get('http_headers', {})
 						track["duration"] = info.get("duration", track.get("duration"))
-						break # 成功したらループを抜ける
+						break
 					except Exception as e:
 						if attempt == max_retries - 1:
 							track["error"] = e
@@ -131,39 +154,6 @@ async def ensure_guild_data(guild_id: int, bot: commands.Bot = None) -> GuildMus
 	if bot:
 		player.start_worker()
 	return player
-
-async def loading_spinner(task_future: asyncio.Future, message: str = "処理中"):
-	"""
-	コンソール用ローディングアニメーション。
-	タスクの完了を待機し、結果を返す。エラー時は失敗を表示して例外を投げる。
-	"""
-	spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
-	colors = itertools.cycle([Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA])
-	clear_line = ' ' * 150
-	try:
-		while not task_future.done():
-			sys.stdout.write(f"\r{next(colors)}[{next(spinner)}] {message}...{Color.RESET}")
-			sys.stdout.flush()
-			await asyncio.sleep(0.1)
-		# 行をクリア
-		sys.stdout.write(f"\r{clear_line}")
-		# task_future.result() はエラーが起きていた場合、ここで例外を再送出する
-		result = task_future.result()
-		# 成功時のログ出力
-		sys.stdout.write(f"\r{Color.GREEN}[✓] {message} 完了!{Color.RESET}\n")
-		sys.stdout.flush()
-		return result
-	except asyncio.CancelledError:
-		sys.stdout.write(f"\r{clear_line}")
-		sys.stdout.write(f"\r{Color.YELLOW}[!] {message} キャンセルされました{Color.RESET}\n")
-		sys.stdout.flush()
-		raise
-	except Exception as e:
-		# エラー時のログ出力 (✗に変更して出力)
-		sys.stdout.write(f"\r{clear_line}")
-		sys.stdout.write(f"\r{Color.RED}[✗] {message} 失敗: {e}{Color.RESET}\n")
-		sys.stdout.flush()
-		raise e
 
 async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 	"""キューから次の曲を取得し、再生処理を行う"""
@@ -204,7 +194,15 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot):
 				logger.error(f"再生時エラー: {error}")
 			asyncio.run_coroutine_threadsafe(play_next_song(ctx, bot), bot.loop)
 		voice_client.play(player, after=after_playing)
-		await music_info_embed(ctx, player, len(player_data.queue))
+		await music_info_embed(
+			ctx=ctx,
+			title=player.title,
+			display_url=player.display_url,
+			duration_raw=player.data.get('duration', 0),
+			thumbnail_url=player.data.get("thumbnail"),
+			queue_count=len(player_data.queue),
+			wait_msg=wait_msg
+		)
 	except Exception as e:
 		logger.error(f"再生ソース生成エラー: {e}")
 		await playback_error_embed(ctx, next_track.get('title', '不明な曲'))
@@ -250,18 +248,23 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot):
 	is_input_url = url.startswith(('http://', 'https://'))
 	# URLがプレイリストかどうかを判定
 	is_playlist_url = is_input_url and ('list=' in url or 'playlist' in url)
+	is_playing_immediately = not player_data.current and not ctx.guild.voice_client.is_playing()
+	wait_msg = None
+	if is_playing_immediately:
+		wait_msg = await preparing_audio_embed(ctx)
+	pool = get_process_pool() # プロセスプールを取得
 	try:
 		search_query = url if is_input_url else f"ytsearch1:{url}"
 
 		# 単一の直接URLの場合は、最初からフル解析(ytdl)を行い二度手間を防ぐ
 		if is_input_url and not is_playlist_url:
-			fetch_task = bot.loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-			info = await loading_spinner(fetch_task, "源のロード")
+			fetch_task = bot.loop.run_in_executor(pool, extract_info_process, url, False)
+			info = await loading_spinner(fetch_task, "音源の取得")
 			if info is None: raise ValueError("情報の取得に失敗")
 			entries = [info]
 			is_playlist = False
 		else:
-			fetch_task = bot.loop.run_in_executor(None, lambda: fast_ytdl.extract_info(search_query, download=False))
+			fetch_task = bot.loop.run_in_executor(pool, extract_info_process, search_query, True)
 			info = await loading_spinner(fetch_task, "メタデータ検索")
 			if info is None: raise ValueError("情報の取得に失敗")
 			entries = info.get('entries', [info]) if 'entries' in info else [info]

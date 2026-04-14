@@ -1,11 +1,16 @@
-discord.py[voice]
+discord.py[voice,speed]
 yt-dlp[default,curl-cffi]
 yt-dlp-ejs
 # yt-dlp-get-pot
 # yt-dlp-getpot-wpc
 aiosqlite
+aiohttp
 python-dotenv
 pyshorteners
-aiohttp
 playwright
 PyNaCl
+
+# 高速化ライブラリ
+winloop #Windowsの場合
+#uvloop #Unix系OSの場合
+aiodns

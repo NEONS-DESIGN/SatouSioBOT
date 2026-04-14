@@ -13,6 +13,7 @@ class Config:
 		self.DEFAULT_VOLUME = self.get_config('default_volume', 0.25, value_type=float)
 		self.DEFAULT_QUEUE_LIMIT = self.get_config('default_queue_limit', 50, value_type=int)
 		self.DEFAULT_PLAYLIST_LIMIT = self.get_config('default_playlist_limit', 10, value_type=int)
+		self.MAX_RETRIES = self.get_config('max_retries', 3, value_type=int)
 	def get_config(self, key, default, value_type=str):
 		try:
 			if value_type == bool:

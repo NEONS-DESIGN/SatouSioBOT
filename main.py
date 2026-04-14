@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import sys
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -11,6 +12,20 @@ from module.logger import setup_daily_logger, get_bot_logger
 from module.music import play_music, ensure_guild_data, server_music_data
 from module.setting import setup_setting_commands
 from module.sqlite import init_db, sql_execution
+
+# OSを自動判定して、最適な高速イベントループを適用する
+if sys.platform == 'win32':
+    try:
+        import winloop
+        asyncio.set_event_loop_policy(winloop.EventLoopPolicy())
+    except ImportError:
+        pass # インストールされていない場合は標準のループを使用
+else: # Unix系OSはuvloopを使用
+    try:
+        import uvloop
+        asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+    except ImportError:
+        pass
 
 # 環境変数の読み込み
 load_dotenv()
