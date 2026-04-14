@@ -14,6 +14,8 @@ class Config:
 		self.DEFAULT_QUEUE_LIMIT = self.get_config('default_queue_limit', 50, value_type=int)
 		self.DEFAULT_PLAYLIST_LIMIT = self.get_config('default_playlist_limit', 10, value_type=int)
 		self.MAX_RETRIES = self.get_config('max_retries', 3, value_type=int)
+		self.MAX_WORKER_THREADS = self.get_config('max_worker_threads', 4, value_type=int)
+		self.CACHE_TTL = self.get_config('cache_ttl', 10800, value_type=int)
 	def get_config(self, key, default, value_type=str):
 		try:
 			if value_type == bool:

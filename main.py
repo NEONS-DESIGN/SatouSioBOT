@@ -415,4 +415,4 @@ async def bot_replay(ctx: commands.Context):
 		logger.error(f"replayコマンド実行エラー: {e}")
 
 if __name__ == "__main__":
-	bot.run(discordToken)
+	bot.run(discordToken, log_handler=None)

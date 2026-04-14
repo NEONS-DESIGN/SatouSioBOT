@@ -4,7 +4,7 @@ import concurrent.futures
 from aiocache import Cache, cached
 import discord
 from discord.ext import commands
-from typing import Dict
+from typing import Dict, Optional
 import sys
 
 from module.color import Color
@@ -16,24 +16,23 @@ from module.sqlite import sql_execution
 
 logger = get_bot_logger()
 
-_process_pool = None
-_ytdl_cache = {}
+_process_pool: Optional[concurrent.futures.ProcessPoolExecutor] = None
+_ytdl_cache: dict = {}
 
-def get_process_pool():
+def get_process_pool() -> concurrent.futures.ProcessPoolExecutor:
 	global _process_pool
 	if _process_pool is None:
-		_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=3)
+		_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=app_config.MAX_WORKER_THREADS)
 	return _process_pool
 
-@cached(ttl=10800, cache=Cache.MEMORY)
-async def fetch_track_info_with_cache(query: str, is_fast: bool):
-	logger = get_bot_logger()
-	logger.info(f"🔍 [CACHE MISS] 新規取得を実行します: {query}")
+@cached(ttl=app_config.CACHE_TTL, cache=Cache.MEMORY)
+async def fetch_track_info_with_cache(query: str, is_fast: bool) -> dict:
+	logger.info(f"キャッシュの新規取得を実行します: {query}")
 	loop = asyncio.get_running_loop()
 	pool = get_process_pool()
 	return await loop.run_in_executor(pool, extract_info_process, query, is_fast)
 
-def extract_info_process(query: str, is_fast: bool):
+def extract_info_process(query: str, is_fast: bool) -> dict:
 	from yt_dlp import YoutubeDL
 	from module.options import YTDLP_OPTIONS, FAST_META_OPTIONS
 	cache_key = 'fast' if is_fast else 'normal'
@@ -43,6 +42,10 @@ def extract_info_process(query: str, is_fast: bool):
 	return _ytdl_cache[cache_key].extract_info(query, download=False)
 
 class GuildMusicPlayer:
+	"""
+	ギルド(サーバー)単位の音楽再生状態を管理するクラス。
+	キュー・プリフェッチワーカー・ループ状態・ボイスクライアントを保持する。
+	"""
 	def __init__(self, guild_id: int, bot: commands.Bot):
 		self.guild_id = guild_id
 		self.bot = bot
@@ -52,19 +55,31 @@ class GuildMusicPlayer:
 		self.current = None
 		self.worker_task = None
 		self.voice_client = None
-	def start_worker(self):
+	def start_worker(self) -> None:
+		"""ワーカータスクが未起動または終了済みの場合のみ新規起動する"""
 		if self.worker_task is None or self.worker_task.done():
-			self.worker_task = self.bot.loop.create_task(guild_prefetch_worker(self))
-	def cleanup(self):
+			self.worker_task = self.bot.loop.create_task(guild_prefetch_worker(self), name=f"prefetch_worker_{self.guild_id}")
+	def cleanup(self) -> None:
+		"""ワーカーのキャンセルとキューの全破棄を行う"""
 		if self.worker_task and not self.worker_task.done():
 			self.worker_task.cancel()
 		self.queue.clear()
-		self.queue_updated_event.clear()
+		# asyncio.Queueの残留タスクを全て消化してロックを解放する
+		while not self.prefetch_queue.empty():
+			try:
+				self.prefetch_queue.get_nowait()
+				self.prefetch_queue.task_done()
+			except asyncio.QueueEmpty:
+				break
 		self.current = None
 
 server_music_data: Dict[int, GuildMusicPlayer] = {}
 
 class YTDLSource(discord.PCMVolumeTransformer):
+	"""
+	yt-dlpで取得したストリームURLをFFmpegで再生するAudioSourceラッパー。
+	PCMVolumeTransformerを継承してリアルタイムの音量調整に対応する。
+	"""
 	def __init__(self, source: discord.AudioSource, *, data: dict, display_url: str, volume: float = 0.25):
 		super().__init__(source, volume)
 		self.data = data
@@ -72,9 +87,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
 		self.display_url = display_url
 	@classmethod
 	async def from_track(cls, track: dict, volume: float = 0.25):
-		filename = track.get('stream_url')
-		if not filename:
-			raise ValueError("ストリームURLが存在しません。")
+		stream_url = track.get('stream_url')
+		if not stream_url:
+			raise ValueError(f"ストリームURLが存在しません: {track.get('title', 'Unknown')}")
 		http_headers = track.get('http_headers', {})
 		header_str = "".join([f"{k}: {v}\r\n" for k, v in http_headers.items()])
 		dynamic_before_options = FFMPEG_OPTIONS['before_options']
@@ -82,7 +97,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
 			dynamic_before_options += f" -headers \"{header_str}\""
 		return cls(
 			discord.FFmpegPCMAudio(
-				filename,
+				stream_url,
 				before_options=dynamic_before_options,
 				options=FFMPEG_OPTIONS['options'],
 				stderr=sys.stderr

@@ -50,15 +50,21 @@ async def init_db():
 		async with _db_lock:
 			await db.execute(create_serverData_query)
 			await db.execute(create_bot_admins_query)
-			cursor = await db.execute("PRAGMA table_info('serverData');")
-			columns = [row for row in await cursor.fetchall()]
-			if "queue_limit" not in columns:
+			# 事前チェック(PRAGMA)を行わず、直接追加を試みる
+			# 「既に存在する(duplicate)」エラーが出た場合のみ安全に無視する
+			try:
 				await db.execute(f'ALTER TABLE "serverData" ADD COLUMN "queue_limit" INTEGER DEFAULT {QUEUE_LIMIT};')
-			if "playlist_limit" not in columns:
+			except Exception as e:
+				if "duplicate column name" not in str(e).lower():
+					logger.warning(f"[SQL] queue_limit追加エラー: {e}")
+			try:
 				await db.execute(f'ALTER TABLE "serverData" ADD COLUMN "playlist_limit" INTEGER DEFAULT {PLAYLIST_LIMIT};')
+			except Exception as e:
+				if "duplicate column name" not in str(e).lower():
+					logger.warning(f"[SQL] playlist_limit追加エラー: {e}")
 			await db.commit()
 	except Exception as e:
-		print(f"[SQL ERROR] データベース初期化エラー: {e}")
+		logger.error(f"[SQL ERROR] データベース初期化エラー: {e}")
 
 async def sql_execution(query: str, params: tuple = ()):
 	"""
