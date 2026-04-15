@@ -1,126 +1,132 @@
-import datetime
-import itertools
-import os
-import re
 import asyncio
+import itertools
+import re
 import sys
-import discord
-import pyshorteners
 import aiohttp
 from urllib.parse import urlparse
+
 from module.color import Color
+import module.logger as _logger_module
 
-# aiohttp シングルトンセッション (TCPコネクションの使い回し)
-_aiohttp_session = None
+# aiohttp セッションのシングルトン (TCPコネクションを使い回す)
+_session: aiohttp.ClientSession | None = None
+# TinyURL API エンドポイント
+_TINYURL_API = "https://tinyurl.com/api-create.php?url={}"
+# URL短縮をスキップする最大長 (これ以下なら短縮不要)
+_SHORTEN_THRESHOLD = 100
+# コンソールクリア用パディング幅
+_CLEAR_WIDTH = 150
 
-async def get_session() -> aiohttp.ClientSession:
+async def _get_session() -> aiohttp.ClientSession:
 	"""モジュール全体で単一のaiohttpセッションを使い回す"""
-	global _aiohttp_session
-	if _aiohttp_session is None or _aiohttp_session.closed:
-		_aiohttp_session = aiohttp.ClientSession()
-	return _aiohttp_session
+	global _session
+	if _session is None or _session.closed:
+		_session = aiohttp.ClientSession()
+	return _session
 
-async def loading_spinner(task_future, message: str = "処理中"):
+async def shorten_url(url: str) -> str:
 	"""
-	コンソール用ローディングアニメーション。
-	コルーチンが渡された場合は自動的にTaskにラップして実行する。
+	URLが_SHORTEN_THRESHOLD文字を超える場合にTinyURLで短縮する。
+	- 短縮失敗時は元のURLをそのまま返す
 	"""
-	# aiocacheの戻り値(コルーチン)を安全にTask化する
-	if asyncio.iscoroutine(task_future):
-		task_future = asyncio.create_task(task_future)
-
-	spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
-	colors = itertools.cycle([Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA])
-	clear_line = ' ' * 150
+	if not url or len(url) < _SHORTEN_THRESHOLD:
+		return url
 	try:
-		while not task_future.done():
-			sys.stdout.write(f"\r{next(colors)}[{next(spinner)}] {message}...{Color.RESET}")
+		session = await _get_session()
+		async with session.get(_TINYURL_API.format(url), timeout=aiohttp.ClientTimeout(total=5)) as resp:
+			if resp.status == 200:
+				return await resp.text()
+	except Exception as e:
+		sys.stdout.write(f"{Color.RED}[URL短縮] 失敗: {e}{Color.RESET}\n")
+		sys.stdout.flush()
+	return url
+
+async def download_file(url: str, dst_path: str) -> bool:
+	"""
+	指定URLからファイルをダウンロードしてdst_pathに保存する。
+	- 成功時True、失敗時Falseを返す
+	"""
+	try:
+		session = await _get_session()
+		async with session.get(url) as resp:
+			if resp.status == 200:
+				with open(dst_path, "wb") as f:
+					f.write(await resp.read())
+				return True
+			sys.stdout.write(f"{Color.RED}[Download] ステータスエラー: {resp.status}{Color.RESET}\n")
+	except Exception as e:
+		sys.stdout.write(f"{Color.RED}[Download] 例外: {e}{Color.RESET}\n")
+	sys.stdout.flush()
+	return False
+
+async def loading_spinner(task: asyncio.Task, message: str = "処理中") -> any:
+	"""
+	コルーチンの完了を待つ間、コンソールにローディングアニメーションを表示する。
+	- コルーチンが渡された場合は自動的にTaskに変換する
+	- スピナー動作中は _logger_module.spinner_active = True にしてSpinnerAwareHandler にログ割り込み時の再描画を委譲する
+	- 完了・キャンセル・例外の各ケースで適切な出力を行い、フラグをリセットする
+	"""
+	if asyncio.iscoroutine(task):
+		task = asyncio.create_task(task)
+	spinner = itertools.cycle(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+	colors  = itertools.cycle([Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA])
+	clear_pad = " " * _CLEAR_WIDTH
+	# スピナー動作中フラグを立てる
+	_logger_module.spinner_active = True
+	try:
+		while not task.done():
+			line = f"\r{next(colors)}[{next(spinner)}] {message}...{Color.RESET}"
+			# SpinnerAwareHandler が再描画に使えるよう現在行を共有する
+			_logger_module.spinner_line = line
+			sys.stdout.write(line)
 			sys.stdout.flush()
 			await asyncio.sleep(0.2)
-		sys.stdout.write(f"\r{clear_line}")
-		result = task_future.result()
-		sys.stdout.write(f"\r{Color.GREEN}[✓] {message} 完了!{Color.RESET}\n")
+		# 完了: フラグを先に下げてからクリア→完了メッセージを出力する
+		_logger_module.spinner_active = False
+		_logger_module.spinner_line = ""
+		sys.stdout.write(f"\r{clear_pad}\r{Color.GREEN}[✓] {message} 完了!{Color.RESET}\n")
 		sys.stdout.flush()
-		return result
+		return task.result()
 	except asyncio.CancelledError:
-		sys.stdout.write(f"\r{clear_line}")
-		sys.stdout.write(f"\r{Color.YELLOW}[!] {message} キャンセルされました{Color.RESET}\n")
+		_logger_module.spinner_active = False
+		_logger_module.spinner_line = ""
+		sys.stdout.write(f"\r{clear_pad}\r{Color.YELLOW}[!] {message} キャンセル{Color.RESET}\n")
 		sys.stdout.flush()
 		raise
 	except Exception as e:
-		sys.stdout.write(f"\r{clear_line}")
-		sys.stdout.write(f"\r{Color.RED}[✗] {message} 失敗: {e}{Color.RESET}\n")
+		_logger_module.spinner_active = False
+		_logger_module.spinner_line = ""
+		sys.stdout.write(f"\r{clear_pad}\r{Color.RED}[✗] {message} 失敗: {e}{Color.RESET}\n")
 		sys.stdout.flush()
-		raise e
+		raise
 
-class Link(discord.ui.View):
-	def __init__(self, url: str):
-		super().__init__()
-		self.url = url
-		asyncio.create_task(self.add_short_link_button())
-	async def add_short_link_button(self):
-		api_key = os.getenv("bitly_api")
-		if not api_key:
-			return
-		loop = asyncio.get_event_loop()
-		for i in range(3):
-			try:
-				s = pyshorteners.Shortener(api_key=api_key)
-				short_url = await loop.run_in_executor(None, lambda: s.bitly.short(self.url))
-				print(f"{Color.BG_GREEN}[Shortener]{Color.RESET}: Successful shortener of {Color.BOLD}{short_url}")
-				self.add_item(discord.ui.Button(label="ダウンロード", url=short_url))
-				break
-			except Exception as e:
-				print(f"{Color.RED}[ERROR]{Color.RESET} 短縮失敗 (残り {2-i}回): {e}")
-				await asyncio.sleep(1)
-
-async def shorten_url(url: str):
-	if not url or len(url) < 100:
-		return url
-	api_url = f"https://tinyurl.com/api-create.php?url={url}"
-	try:
-		session = await get_session() # シングルトンセッションを使用
-		async with session.get(api_url) as response:
-			if response.status == 200:
-				return await response.text()
-		return url
-	except Exception as e:
-		print(f"{Color.RED}[ERROR]{Color.RESET} URL短縮に失敗しました: {e}")
-		return url
-
-async def download_file(url: str, dst_path: str):
-	try:
-		session = await get_session() # シングルトンセッションを使用
-		async with session.get(url) as response:
-			if response.status == 200:
-				with open(dst_path, 'wb') as f:
-					f.write(await response.read())
-				print(f"{Color.BG_GREEN}[Downloader]{Color.RESET}: Successful download of {Color.BOLD}{url}")
-			else:
-				print(f"{Color.RED}[ERROR]{Color.RESET} Download failed with status: {response.status}")
-	except Exception as e:
-		print(f"{Color.RED}[ERROR]{Color.RESET} Download Exception: {e}")
-
-async def get_id(url: str):
+async def get_id(url: str) -> tuple[str, str]:
+	"""
+	URLからプラットフォームと動画IDを判定して返す。
+	- YouTube: (video_id, "youtube")
+	- ニコニコ: (video_id, "niconico")
+	- その他URL: ("", "url")
+	- 非URL: ("", "title")
+	"""
 	if not url.startswith(("http://", "https://")):
 		return "", "title"
-	yt_regex = r'(?:v=|\/)([0-9A-Za-z_-]{11})'
-	parsed_url = urlparse(url)
-	domain = parsed_url.netloc
-	path = parsed_url.path
+	parsed = urlparse(url)
+	domain = parsed.netloc
+	path = parsed.path
 	if "youtube.com" in domain or "youtu.be" in domain:
-		if match := re.search(yt_regex, url):
-			return match.group(1), "youtube"
+		if m := re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url):
+			return m.group(1), "youtube"
 	elif "nicovideo.jp" in domain:
-		vid = path.split("/")[-1]
-		return vid, "niconico"
+		return path.split("/")[-1], "niconico"
 	return "", "url"
 
-async def play_time(duration: int):
+async def play_time(duration: int) -> str:
+	"""
+	秒数を "MM:SS" または "HH:MM:SS" 形式の文字列に変換する。
+	- durationが0またはNoneの場合は "00:00" を返す
+	"""
 	if not duration:
 		return "00:00"
-	h, remainder = divmod(duration, 3600)
-	m, s = divmod(remainder, 60)
-	if h > 0:
-		return f"{h:02}:{m:02}:{s:02}"
-	return f"{m:02}:{s:02}"
+	h, rem = divmod(int(duration), 3600)
+	m, s = divmod(rem, 60)
+	return f"{h:02}:{m:02}:{s:02}" if h > 0 else f"{m:02}:{s:02}"

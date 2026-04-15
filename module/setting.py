@@ -51,8 +51,8 @@ def setup_setting_commands(bot: commands.Bot):
 			return await permission_error_embed(ctx)
 		if not (1 <= limit <= 50):
 			return await limit_range_error_embed(ctx)
-		await sql_execution("INSERT OR IGNORE INTO serverData (guild_id) VALUES (?);", (ctx.guild.id,))
-		await sql_execution("UPDATE serverData SET queue_limit=? WHERE guild_id=?;", (limit, ctx.guild.id))
+		await sql_execution("INSERT OR IGNORE INTO server_data (guild_id) VALUES (?);", (ctx.guild.id,))
+		await sql_execution("UPDATE server_data SET queue_limit=? WHERE guild_id=?;", (limit, ctx.guild.id))
 		await limit_updated_embed(ctx, "キューの最大曲数", limit)
 
 	@setting_limit.command(name="playlist", description="プレイリストから取得する最大曲数を設定します。(1〜50)")
@@ -61,6 +61,6 @@ def setup_setting_commands(bot: commands.Bot):
 			return await permission_error_embed(ctx)
 		if not (1 <= limit <= 50):
 			return await limit_range_error_embed(ctx)
-		await sql_execution("INSERT OR IGNORE INTO serverData (guild_id) VALUES (?);", (ctx.guild.id,))
-		await sql_execution("UPDATE serverData SET playlist_limit=? WHERE guild_id=?;", (limit, ctx.guild.id))
+		await sql_execution("INSERT OR IGNORE INTO server_data (guild_id) VALUES (?);", (ctx.guild.id,))
+		await sql_execution("UPDATE server_data SET playlist_limit=? WHERE guild_id=?;", (limit, ctx.guild.id))
 		await limit_updated_embed(ctx, "プレイリストの取得上限", limit)
