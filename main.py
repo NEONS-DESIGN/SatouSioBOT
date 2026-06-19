@@ -2,16 +2,18 @@ import asyncio
 import os
 import random
 import sys
+import time
 import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
 from module.embed import *
-from module.logger import setup_daily_logger, get_bot_logger
-from module.music import play_music, ensure_guild_data, server_music_data
+from module.logger import setup_daily_logger, get_bot_logger, perf
+from module.music import play_music, ensure_guild_data, server_music_data, shutdown_process_pool
 from module.setting import setup_setting_commands
-from module.sqlite import init_db, sql_execution
+from module.sqlite import init_db, sql_execution, close_db
+from module.utils import close_http_session
 
 # OS別の高速イベントループを適用する
 # win32: winloop / その他: uvloop / どちらもなければ標準ループ
@@ -50,6 +52,17 @@ class SatouSioBot(commands.Bot):
 		setup_setting_commands(self)
 		await self.tree.sync()
 		logger.info("スラッシュコマンドを同期しました。")
+	async def close(self) -> None:
+		"""終了時にワーカー・DB接続・HTTPセッション・プロセスプールを解放する"""
+		logger.info("シャットダウン処理を開始します...")
+		for player in list(server_music_data.values()):
+			player.cleanup()
+		server_music_data.clear()
+		await close_db()
+		await close_http_session()
+		shutdown_process_pool()
+		await super().close()
+		logger.info("リソースを解放しました。")
 
 bot = SatouSioBot()
 
@@ -95,11 +108,11 @@ class SimplePaginator(discord.ui.View):
 		await self._update(interaction)
 	@discord.ui.button(label="◀", style=discord.ButtonStyle.success)
 	async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-		self.current_page = (self.current_page - 1) % len(self.embeds)
+		self.current_page = max(0, self.current_page - 1)
 		await self._update(interaction)
 	@discord.ui.button(label="▶", style=discord.ButtonStyle.success)
 	async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
-		self.current_page = (self.current_page + 1) % len(self.embeds)
+		self.current_page = min(len(self.embeds) - 1, self.current_page + 1)
 		await self._update(interaction)
 	@discord.ui.button(label="▶❚", style=discord.ButtonStyle.primary)
 	async def last_button(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -161,16 +174,20 @@ async def bot_play(ctx: commands.Context, *, query: str) -> None:
 	if not ctx.author.voice:
 		return await user_not_here_embed(ctx)
 	await ctx.defer()
+	t_request = time.perf_counter()
 	try:
 		vc = ctx.guild.voice_client
 		if not vc:
-			player = await ensure_guild_data(ctx.guild.id, bot)
-			player.voice_client = await ctx.author.voice.channel.connect()
+			await ensure_guild_data(ctx.guild.id, bot)
+			t_conn = time.perf_counter()
+			await ctx.author.voice.channel.connect()
+			perf("VC接続", (time.perf_counter() - t_conn) * 1000)
 		elif vc.channel != ctx.author.voice.channel:
+			t_conn = time.perf_counter()
 			await vc.move_to(ctx.author.voice.channel)
-			player = await ensure_guild_data(ctx.guild.id, bot)
-			player.voice_client = vc
-		await play_music(ctx, query, bot)
+			perf("VC移動", (time.perf_counter() - t_conn) * 1000)
+			await ensure_guild_data(ctx.guild.id, bot)
+		await play_music(ctx, query, bot, t_request=t_request)
 	except Exception as e:
 		await exception_embed(ctx, "play", e)
 		logger.error(f"playコマンド実行エラー: {e}")
@@ -186,8 +203,14 @@ async def bot_volume(ctx: commands.Context, volume: app_commands.Range[int, 1, 2
 		vc = ctx.guild.voice_client
 		if vc and vc.source:
 			vc.source.volume = target_vol
-		await sql_execution("INSERT OR IGNORE INTO server_data (guild_id) VALUES (?);", (guild_id,))
-		await sql_execution("UPDATE server_data SET volume=? WHERE guild_id=?;", (target_vol, guild_id))
+		# プレイヤーの音量キャッシュも更新する (再生中/次曲の両方に反映)
+		player = await ensure_guild_data(guild_id)
+		player.volume = target_vol
+		await sql_execution(
+			"INSERT INTO server_data (guild_id, volume) VALUES (?, ?) "
+			"ON CONFLICT(guild_id) DO UPDATE SET volume=excluded.volume;",
+			(guild_id, target_vol),
+		)
 		await volume_set_embed(ctx, volume)
 	except Exception as e:
 		await exception_embed(ctx, "volume", e)
@@ -349,7 +372,7 @@ async def bot_resume(ctx: commands.Context) -> None:
 @app_commands.describe(start="削除する件数、または削除を開始する番号", end="削除を終了する番号(範囲指定時)")
 @app_commands.rename(start="件数または開始番号", end="終了番号")
 @commands.guild_only()
-async def bot_clear(ctx: commands.Context, start: int = None, end: int = None) -> None:
+async def bot_clear(ctx: commands.Context, start: int | None = None, end: int | None = None) -> None:
 	await ctx.defer()
 	try:
 		player = await ensure_guild_data(ctx.guild.id, bot)

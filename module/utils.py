@@ -1,9 +1,9 @@
 import asyncio
 import itertools
-import re
 import sys
+from typing import Any
+
 import aiohttp
-from urllib.parse import urlparse
 
 from module.color import Color
 import module.logger as _logger_module
@@ -41,25 +41,14 @@ async def shorten_url(url: str) -> str:
 		sys.stdout.flush()
 	return url
 
-async def download_file(url: str, dst_path: str) -> bool:
-	"""
-	指定URLからファイルをダウンロードしてdst_pathに保存する。
-	- 成功時True、失敗時Falseを返す
-	"""
-	try:
-		session = await _get_session()
-		async with session.get(url) as resp:
-			if resp.status == 200:
-				with open(dst_path, "wb") as f:
-					f.write(await resp.read())
-				return True
-			sys.stdout.write(f"{Color.RED}[Download] ステータスエラー: {resp.status}{Color.RESET}\n")
-	except Exception as e:
-		sys.stdout.write(f"{Color.RED}[Download] 例外: {e}{Color.RESET}\n")
-	sys.stdout.flush()
-	return False
+async def close_http_session() -> None:
+	"""共有aiohttpセッションを閉じる（終了時に呼ぶ）"""
+	global _session
+	if _session is not None and not _session.closed:
+		await _session.close()
+	_session = None
 
-async def loading_spinner(task: asyncio.Task, message: str = "処理中") -> any:
+async def loading_spinner(task: asyncio.Task, message: str = "処理中") -> Any:
 	"""
 	コルーチンの完了を待つ間、コンソールにローディングアニメーションを表示する。
 	- コルーチンが渡された場合は自動的にTaskに変換する
@@ -99,26 +88,6 @@ async def loading_spinner(task: asyncio.Task, message: str = "処理中") -> any
 		sys.stdout.write(f"\r{clear_pad}\r{Color.RED}[✗] {message} 失敗: {e}{Color.RESET}\n")
 		sys.stdout.flush()
 		raise
-
-async def get_id(url: str) -> tuple[str, str]:
-	"""
-	URLからプラットフォームと動画IDを判定して返す。
-	- YouTube: (video_id, "youtube")
-	- ニコニコ: (video_id, "niconico")
-	- その他URL: ("", "url")
-	- 非URL: ("", "title")
-	"""
-	if not url.startswith(("http://", "https://")):
-		return "", "title"
-	parsed = urlparse(url)
-	domain = parsed.netloc
-	path = parsed.path
-	if "youtube.com" in domain or "youtu.be" in domain:
-		if m := re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11})", url):
-			return m.group(1), "youtube"
-	elif "nicovideo.jp" in domain:
-		return path.split("/")[-1], "niconico"
-	return "", "url"
 
 async def play_time(duration: int) -> str:
 	"""

@@ -2,10 +2,11 @@ import asyncio
 import collections
 import concurrent.futures
 import sys
+import time
 from typing import Any
 
 import discord
-from aiocache import Cache, cached
+from aiocache import Cache
 from discord.ext import commands
 
 from module.color import Color, Embed as EmbedColor
@@ -14,10 +15,10 @@ from module.embed import (
 	playlist_added_embed, queue_added_embed, play_completed_embed,
 	load_error_embed, skip_error_embed, playback_error_embed,
 )
-from module.logger import get_bot_logger
+from module.logger import get_bot_logger, perf
 from module.options import FFMPEG_OPTIONS, app_config
 from module.sqlite import sql_execution
-from module.utils import loading_spinner, shorten_url
+from module.utils import loading_spinner
 
 logger = get_bot_logger()
 
@@ -29,6 +30,13 @@ def _get_process_pool() -> concurrent.futures.ProcessPoolExecutor:
 	if _process_pool is None:
 		_process_pool = concurrent.futures.ProcessPoolExecutor(max_workers=app_config.MAX_WORKER_THREADS)
 	return _process_pool
+
+def shutdown_process_pool() -> None:
+	"""ProcessPoolExecutorを停止して子プロセスを回収する（終了時に呼ぶ）"""
+	global _process_pool
+	if _process_pool is not None:
+		_process_pool.shutdown(wait=False, cancel_futures=True)
+		_process_pool = None
 
 # ==========================================
 # yt-dlp 情報取得 (プロセス分離 + キャッシュ)
@@ -48,15 +56,33 @@ def extract_info_process(query: str, is_fast: bool) -> dict:
 		_ytdl_instances[key] = YoutubeDL(FAST_META_OPTIONS if is_fast else YTDLP_OPTIONS)
 	return _ytdl_instances[key].extract_info(query, download=False)
 
-@cached(ttl=app_config.CACHE_TTL, cache=Cache.MEMORY)
+# メタデータ専用のインメモリTTLキャッシュ（失効しないデータのみ保持する）
+_meta_cache = Cache(Cache.MEMORY)
+
 async def fetch_track_info(query: str, is_fast: bool) -> dict:
 	"""
-	extract_info_processをプロセスプール経由で非同期実行し、結果をキャッシュする。
-	- ttl: config.iniのcache_ttl秒
+	extract_info_processをプロセスプール経由で非同期実行する。
+	- is_fast=True  (メタデータ): CACHE_TTL秒キャッシュする。メタデータは失効しないため安全。
+	- is_fast=False (ストリームURL): キャッシュしない。毎回新しいURLを解決することで、
+	  /replay やループでの再取得が確実に最新URLになり、URL失効による403も避けられる。
 	"""
-	logger.info(f"キャッシュの新規取得: {query}")
 	loop = asyncio.get_running_loop()
-	return await loop.run_in_executor(_get_process_pool(), extract_info_process, query, is_fast)
+	if is_fast:
+		hit = await _meta_cache.get(query)
+		if hit is not None:
+			perf("メタ取得(cacheヒット)", 0.0)
+			return hit
+		logger.info(f"メタデータの新規取得: {query}")
+		t = time.perf_counter()
+		result = await loop.run_in_executor(_get_process_pool(), extract_info_process, query, True)
+		perf("メタ抽出(yt-dlp)", (time.perf_counter() - t) * 1000)
+		await _meta_cache.set(query, result, ttl=app_config.CACHE_TTL)
+		return result
+	logger.info(f"ストリームURLの解決: {query}")
+	t = time.perf_counter()
+	result = await loop.run_in_executor(_get_process_pool(), extract_info_process, query, False)
+	perf("本抽出(yt-dlp/stream_url)", (time.perf_counter() - t) * 1000)
+	return result
 
 # GuildMusicPlayer (ギルド単位の管理クラス)
 class GuildMusicPlayer:
@@ -64,9 +90,10 @@ class GuildMusicPlayer:
 	ギルド単位の再生状態を管理するクラス。
 	- queue: collections.deque でトラックを保持
 	- queue_updated_event: プリフェッチワーカーを起こすイベント
-	- loop / current / voice_client: 再生状態
+	- loop / current: 再生状態
+	- volume: 音量キャッシュ (Noneなら次回再生時にDBから読込、/vol で更新)
 	"""
-	__slots__ = ("guild_id", "bot", "queue", "queue_updated_event", "loop", "current", "worker_task", "voice_client")
+	__slots__ = ("guild_id", "bot", "queue", "queue_updated_event", "loop", "current", "worker_task", "volume")
 	def __init__(self, guild_id: int, bot: commands.Bot) -> None:
 		self.guild_id = guild_id
 		self.bot = bot
@@ -75,7 +102,8 @@ class GuildMusicPlayer:
 		self.loop = False
 		self.current: dict | None = None
 		self.worker_task: asyncio.Task | None = None
-		self.voice_client: discord.VoiceClient | None = None
+		# 音量キャッシュ。Noneなら次回再生時にDBから読み込む。/vol 実行時に更新される
+		self.volume: float | None = None
 	def start_worker(self) -> None:
 		"""ワーカーが未起動または終了済みの場合のみ起動する"""
 		if self.worker_task is None or self.worker_task.done():
@@ -118,7 +146,10 @@ class YTDLSource(discord.PCMVolumeTransformer):
 		http_headers: dict = track.get("http_headers", {})
 		before_options = FFMPEG_OPTIONS["before_options"]
 		if http_headers:
-			header_str = "".join(f"{k}: {v}\r\n" for k, v in http_headers.items())
+			# ヘッダ値に含まれる " や改行はFFmpeg引数を破壊するため除去する
+			def _clean(v: object) -> str:
+				return str(v).replace('"', "").replace("\r", "").replace("\n", "")
+			header_str = "".join(f"{k}: {_clean(v)}\r\n" for k, v in http_headers.items())
 			before_options += f' -headers "{header_str}"'
 		return cls(
 			discord.FFmpegPCMAudio(
@@ -234,7 +265,9 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot) -> None:
 			if not next_track["ready_event"].is_set():
 				if not wait_msg:
 					wait_msg = await preparing_audio_embed(ctx)
+				t_wait = time.perf_counter()
 				await next_track["ready_event"].wait()
+				perf("stream_url待ち", (time.perf_counter() - t_wait) * 1000)
 			if next_track.get("error"):
 				if wait_msg:
 					try:
@@ -243,15 +276,20 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot) -> None:
 						pass
 				await skip_error_embed(ctx, next_track["title"])
 				continue  # 次のトラックへ
-			# 音量をDBから取得する (なければデフォルト値)
-			rows = await sql_execution("SELECT volume FROM server_data WHERE guild_id=?;", (guild_id,))
-			vol: float = rows[0][0] if rows else app_config.DEFAULT_VOLUME
-			source = await YTDLSource.from_track(next_track, volume=vol)
+			# 音量はプレイヤーにキャッシュする (初回のみDB参照、/vol で更新される)
+			if player.volume is None:
+				rows = await sql_execution("SELECT volume FROM server_data WHERE guild_id=?;", (guild_id,))
+				player.volume = rows[0][0] if rows else app_config.DEFAULT_VOLUME
+			t_ff = time.perf_counter()
+			source = await YTDLSource.from_track(next_track, volume=player.volume)
+			perf("FFmpeg起動", (time.perf_counter() - t_ff) * 1000)
 			def _after_playing(error: Exception | None) -> None:
 				if error:
 					logger.error(f"再生時エラー (ギルド {guild_id}): {error}")
 				asyncio.run_coroutine_threadsafe(play_next_song(ctx, bot), bot.loop)
 			vc.play(source, after=_after_playing)
+			if next_track.get("t_request"):
+				perf("★総計 コマンド→再生開始", (time.perf_counter() - next_track["t_request"]) * 1000)
 			await music_info_embed(ctx, source, len(player.queue), wait_msg)
 			return
 		except Exception as e:
@@ -260,7 +298,7 @@ async def play_next_song(ctx: commands.Context, bot: commands.Bot) -> None:
 			continue  # 次のトラックへ
 
 # 音楽再生エントリポイント
-async def play_music(ctx: commands.Context, url: str, bot: commands.Bot) -> None:
+async def play_music(ctx: commands.Context, url: str, bot: commands.Bot, t_request: float | None = None) -> None:
 	"""
 	URLまたは検索クエリを受け取りキューに追加する。
 	- プレイリストURL: playlist_limit件までキューに追加
@@ -270,7 +308,8 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot) -> None
 	player = await ensure_guild_data(ctx.guild.id, bot)
 	is_url = url.startswith(("http://", "https://"))
 	is_playlist = is_url and ("list=" in url or "playlist" in url)
-	is_idle = not player.current and not ctx.guild.voice_client.is_playing()
+	vc = ctx.guild.voice_client
+	is_idle = not player.current and (vc is None or not vc.is_playing())
 	wait_msg: discord.Message | None = None
 	if is_idle:
 		wait_msg = await preparing_audio_embed(ctx)
@@ -347,6 +386,9 @@ async def play_music(ctx: commands.Context, url: str, bot: commands.Bot) -> None
 				track["http_headers"] = entry.get("http_headers", {})
 				track["is_fetching"] = True
 				ready_event.set()
+			# 最初に再生されるトラックに計測用タイムスタンプを付与する（アイドル時のみ）
+			if is_idle and t_request is not None and queued_count == 0:
+				track["t_request"] = t_request
 			player.queue.append(track)
 			player.queue_updated_event.set()
 			queued_count += 1

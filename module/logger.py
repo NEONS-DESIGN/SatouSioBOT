@@ -89,3 +89,14 @@ def setup_daily_logger() -> None:
 def get_bot_logger(name: str = "MusicBot") -> logging.Logger:
 	"""Bot専用のロガーインスタンスを取得する"""
 	return logging.getLogger(name)
+
+# ==========================================
+# パフォーマンス計測 (一時的なレスポンス計測用)
+# PERF_LOG を False にすると [PERF] ログを止められる
+# ==========================================
+PERF_LOG: bool = True
+
+def perf(label: str, ms: float) -> None:
+	"""[PERF] ラベル: NNms 形式で所要時間を出力する"""
+	if PERF_LOG:
+		logging.getLogger("MusicBot").info(f"[PERF] {label}: {ms:.1f}ms")
