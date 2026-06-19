@@ -74,6 +74,16 @@ async def init_db() -> None:
 		logger.error(f"[SQLite] データベース初期化エラー: {e}")
 		raise
 
+async def close_db() -> None:
+	"""永続SQLite接続を閉じる（終了時に呼ぶ）"""
+	global _connection
+	if _connection is not None:
+		try:
+			await _connection.close()
+		finally:
+			_connection = None
+			logger.info("[SQLite] 接続を閉じました。")
+
 async def sql_execution(query: str, params: tuple = ()) -> list | None:
 	"""
 	SQLクエリを実行し、結果行のリストを返す。

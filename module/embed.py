@@ -1,4 +1,6 @@
 import collections
+from typing import Any
+
 import discord
 from discord.ext import commands
 
@@ -159,7 +161,7 @@ async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int) -
 	embed.add_field(name="待機数",   value=f"{queue_pos} 曲", inline=True)
 	await ctx.send(embed=embed)
 
-async def music_info_embed(ctx: commands.Context, player: any, queue_count: int, wait_msg: discord.Message | None = None,) -> None:
+async def music_info_embed(ctx: commands.Context, player: Any, queue_count: int, wait_msg: discord.Message | None = None,) -> None:
 	"""
 	再生中の楽曲情報をEmbedで送信する。
 	- wait_msgが渡された場合はそのメッセージを編集して幽霊エラーを防ぐ
