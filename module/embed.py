@@ -1,11 +1,13 @@
-import collections
-from typing import Any
+from collections.abc import Iterable
 
 import discord
 from discord.ext import commands
 
 from module.color import Embed as EmbedColor
-from module.utils import play_time, shorten_url
+from module.logger import get_bot_logger
+from module.utils import format_duration
+
+logger = get_bot_logger()
 
 # カラー定数 (module/color.py の Embed クラスから参照)
 _RED    = EmbedColor.RED
@@ -15,42 +17,61 @@ _YELLOW = EmbedColor.YELLOW
 
 # 再生中サムネイルのフォールバック画像URL
 _FALLBACK_THUMBNAIL = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=1024&auto=format&fit=crop"
+# Embed の説明文・フィールド値の最大文字数 (Discord の制限)
+_DESCRIPTION_LIMIT = 4096
+_FIELD_VALUE_LIMIT = 1024
+# 再生中表示のタイトル最大文字数
+_NOW_PLAYING_TITLE_LIMIT = 100
+# キューリストの1ページあたりの曲数とタイトル最大文字数
+_TRACKS_PER_PAGE = 10
+_QUEUE_TITLE_LIMIT = 45
 
 
 # ==========================================
 # 内部ヘルパー
 # ==========================================
-async def _send(ctx: commands.Context, title: str, description: str | None = None, color: int = _GREEN, ephemeral: bool = False, edit_msg: discord.Message | None = None) -> discord.Message:
-	"""
-	シンプルなEmbedを送信または編集する共通関数。
-	- edit_msgが渡された場合はそのメッセージを編集する
-	- 編集に失敗した場合は新規送信にフォールバックする
-	"""
-	embed = discord.Embed(title=title, description=description, color=color)
+async def _send_or_edit(ctx: commands.Context, embed: discord.Embed, edit_msg: discord.Message | None = None, ephemeral: bool = False) -> discord.Message:
+	"""edit_msg があれば編集し、失敗 (削除済みなど) または未指定なら新規送信する"""
 	if edit_msg:
 		try:
 			return await edit_msg.edit(embed=embed)
-		except (discord.NotFound, discord.HTTPException):
+		except discord.HTTPException:
 			pass
 	return await ctx.send(embed=embed, ephemeral=ephemeral)
+
+async def _send(ctx: commands.Context, title: str, description: str | None = None, color: int = _GREEN, ephemeral: bool = False, edit_msg: discord.Message | None = None) -> discord.Message:
+	"""タイトルと説明文だけのシンプルなEmbedを送信 (edit_msg 指定時は編集) する"""
+	if description is not None:
+		description = _truncate(description, _DESCRIPTION_LIMIT)
+	return await _send_or_edit(ctx, discord.Embed(title=title, description=description, color=color), edit_msg, ephemeral)
+
+def _truncate(text: str, limit: int) -> str:
+	"""limit 文字を超える場合は末尾を "..." にして切り詰める"""
+	return text if len(text) <= limit else text[:limit - 3] + "..."
+
+def _title_link(title: str, url: str | None) -> str:
+	"""[タイトル](URL) 形式のリンクを返す。フィールド上限を超える場合はタイトルのみにする"""
+	if url:
+		link = f"[{title}]({url})"
+		if len(link) <= _FIELD_VALUE_LIMIT:
+			return link
+	return _truncate(title, _FIELD_VALUE_LIMIT)
+
+def _set_requester_footer(embed: discord.Embed, ctx: commands.Context) -> None:
+	"""Embed のフッターにリクエスト者を表示する"""
+	embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
 
 def _music_embed_base(ctx: commands.Context, info: dict, title: str) -> discord.Embed:
 	"""
 	楽曲・プレイリスト追加通知用Embedのベースを生成する内部関数。
 	- タイトル・URL・サムネイル・フッターを共通でセットする
 	"""
-	track_title = info.get("title", "Unknown Title")
-	url = info.get("webpage_url") or info.get("url", "")
-	thumbnail = info.get("thumbnail")
+	url = info.get("webpage_url") or info.get("url")
 	embed = discord.Embed(title=title, color=_BLUE)
 	label = "プレイリスト名" if "プレイリスト" in title else "タイトル"
-	field_value = f"[{track_title}]({url})" if url else track_title
-	if len(field_value) > 1024:
-		field_value = track_title[:1024]
-	embed.add_field(name=label, value=field_value, inline=False)
-	icon_url = ctx.author.display_avatar.url if ctx.author.display_avatar else None
-	embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=icon_url)
-	if thumbnail:
+	embed.add_field(name=label, value=_title_link(info.get("title", "Unknown Title"), url), inline=False)
+	_set_requester_footer(embed, ctx)
+	if thumbnail := info.get("thumbnail"):
 		embed.set_image(url=thumbnail)
 	return embed
 
@@ -89,10 +110,10 @@ def help_pages() -> list[discord.Embed]:
 
 	return [p1, p2, p3]
 
-async def help_mention_embed(message: discord.Message) -> None:
-	"""メンション受信時のヘルプ案内"""
+async def help_mention_embed(message: discord.Message, help_mention: str) -> None:
+	"""メンション受信時のヘルプ案内。help_mention は </help:ID> 形式のコマンドメンション"""
 	embed = discord.Embed(
-		description="助けが必要ですか？\n必要な場合は、</help:1140613857224687616> コマンドを実行してください。",
+		description=f"助けが必要ですか？\n必要な場合は、{help_mention} コマンドを実行してください。",
 		color=_GREEN,
 	)
 	await message.reply(embed=embed)
@@ -141,61 +162,42 @@ async def clear_queue_embed(ctx: commands.Context, count: int) -> None:
 # ==========================================
 # 楽曲追加・再生情報
 # ==========================================
-async def playlist_added_embed(ctx: commands.Context, info: dict, count: int, edit_msg: discord.Message | None = None,) -> None:
+async def playlist_added_embed(ctx: commands.Context, info: dict, count: int, edit_msg: discord.Message | None = None) -> None:
 	"""プレイリストをキューに追加した際の通知Embed"""
 	embed = _music_embed_base(ctx, info, "📝 プレイリストをキューに追加")
 	embed.add_field(name="追加曲数", value=f"{count} 曲", inline=True)
-	if edit_msg:
-		try:
-			await edit_msg.edit(embed=embed)
-			return
-		except (discord.NotFound, discord.HTTPException):
-			pass
-	await ctx.send(embed=embed)
+	await _send_or_edit(ctx, embed, edit_msg)
 
-async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int) -> None:
+async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int, edit_msg: discord.Message | None = None) -> None:
 	"""単曲をキューに追加した際の通知Embed"""
 	embed = _music_embed_base(ctx, info, "✅ キューに追加")
-	duration = await play_time(info.get("duration", 0))
+	duration = format_duration(info.get("duration"))
 	embed.add_field(name="再生時間", value=duration, inline=True)
 	embed.add_field(name="待機数",   value=f"{queue_pos} 曲", inline=True)
-	await ctx.send(embed=embed)
+	await _send_or_edit(ctx, embed, edit_msg)
 
-async def music_info_embed(ctx: commands.Context, player: Any, queue_count: int, wait_msg: discord.Message | None = None,) -> None:
+async def music_info_embed(ctx: commands.Context, source: discord.AudioSource, queue_count: int, wait_msg: discord.Message | None = None) -> None:
 	"""
 	再生中の楽曲情報をEmbedで送信する。
-	- wait_msgが渡された場合はそのメッセージを編集して幽霊エラーを防ぐ
+	- source は data(track dict) / title / display_url を持つ再生ソース
+	- wait_msg が渡された場合はそのメッセージを編集する
 	- 失敗時はフォールバック表示に切り替える
 	"""
+	title = str(getattr(source, "title", "Unknown Title"))
 	try:
+		data: dict = source.data
 		embed = discord.Embed(title="🎵 再生中", color=_GREEN)
-		title_str = str(player.title)
-		if len(title_str) > 100:
-			title_str = title_str[:97] + "..."
-		short_url = await shorten_url(player.display_url)
-		field_value = f"[{title_str}]({short_url})"
-		if len(field_value) > 1024:
-			field_value = title_str[:1024]
-		embed.add_field(name="タイトル", value=field_value, inline=False)
-		duration = await play_time(player.data.get("duration") or 0)
-		embed.add_field(name="再生時間", value=duration, inline=True)
+		embed.add_field(name="タイトル", value=_title_link(_truncate(title, _NOW_PLAYING_TITLE_LIMIT), source.display_url), inline=False)
+		embed.add_field(name="再生時間", value=format_duration(data.get("duration")), inline=True)
 		embed.add_field(name="待機数",   value=f"{queue_count} 曲", inline=True)
-		icon_url = ctx.author.display_avatar.url if ctx.author.display_avatar else None
-		embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=icon_url)
-		embed.set_image(url=player.data.get("thumbnail") or _FALLBACK_THUMBNAIL)
-		if wait_msg:
-			try:
-				await wait_msg.edit(embed=embed)
-				return
-			except (discord.NotFound, discord.HTTPException):
-				pass
-		await ctx.send(embed=embed)
+		_set_requester_footer(embed, ctx)
+		embed.set_image(url=data.get("thumbnail") or _FALLBACK_THUMBNAIL)
+		await _send_or_edit(ctx, embed, wait_msg)
 	except Exception as e:
-		from module.logger import get_bot_logger
-		get_bot_logger().error(f"music_info_embed エラー: {e}")
+		logger.error(f"music_info_embed エラー: {e}")
 		try:
-			await music_info_fallback_embed(ctx, player.title if player else "Unknown Title")
-		except Exception:
+			await music_info_fallback_embed(ctx, title)
+		except discord.HTTPException:
 			pass
 
 async def preparing_audio_embed(ctx: commands.Context) -> discord.Message:
@@ -208,9 +210,6 @@ async def preparing_audio_embed(ctx: commands.Context) -> discord.Message:
 # ==========================================
 async def not_connect_bot_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "ℹ️ BOTがボイスチャンネルに接続していません。", color=_RED)
-
-async def bot_not_in_vc_embed(ctx: commands.Context) -> None:
-	await not_connect_bot_embed(ctx)
 
 async def user_not_here_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "⚠️ ボイスチャンネルに接続してから実行してください。", color=_RED)
@@ -264,8 +263,11 @@ async def admin_added_embed(ctx: commands.Context, user: discord.Member) -> None
 async def admin_removed_embed(ctx: commands.Context, user: discord.Member) -> None:
 	await _send(ctx, "✅ 権限剥奪", f"{user.mention} のBot操作権限を剥奪しました。", _GREEN)
 
-async def limit_range_error_embed(ctx: commands.Context) -> None:
-	await _send(ctx, "⚠️ 範囲エラー", "1から50の間で指定してください。", _YELLOW)
+async def invalid_argument_embed(ctx: commands.Context, detail: str) -> None:
+	await _send(ctx, "⚠️ 入力エラー", f"引数が正しくありません。\n{detail}", _YELLOW)
+
+async def guild_only_embed(ctx: commands.Context) -> None:
+	await _send(ctx, "⚠️ 通知", "このコマンドはサーバー内でのみ使用できます。", _YELLOW)
 
 async def limit_updated_embed(ctx: commands.Context, target: str, limit: int) -> None:
 	await _send(ctx, "✅ 設定更新", f"{target}を **{limit}** 曲に設定しました。", _GREEN)
@@ -274,24 +276,22 @@ async def limit_updated_embed(ctx: commands.Context, target: str, limit: int) ->
 # ==========================================
 # キューリスト表示
 # ==========================================
-async def queue_list_pages(queue: collections.deque | list) -> list[discord.Embed]:
-	if not queue:
-		return [discord.Embed(title="📝 キューリスト", description="キューは空です。", color=_BLUE)]
-	TRACKS_PER_PAGE = 10
+def queue_list_pages(queue: Iterable[dict]) -> list[discord.Embed]:
+	"""キューの内容を _TRACKS_PER_PAGE 曲ずつのページ Embed リストにする"""
 	items = list(queue)
-	total = len(items)
-	total_pages = (total - 1) // TRACKS_PER_PAGE + 1
+	if not items:
+		return [discord.Embed(title="📝 キューリスト", description="キューは空です。", color=_BLUE)]
+	total_pages = (len(items) - 1) // _TRACKS_PER_PAGE + 1
 	embeds: list[discord.Embed] = []
 	for page in range(total_pages):
-		embed = discord.Embed(title=f"📝 キューリスト ({page + 1}/{total_pages}ページ)", color=_BLUE)
-		start = page * TRACKS_PER_PAGE
-		lines: list[str] = []
-		for i, track in enumerate(items[start:start + TRACKS_PER_PAGE], start=start + 1):
-			t = track.get("title", "Unknown Title")
-			if len(t) > 45:
-				t = t[:42] + "..."
-			dur = await play_time(track.get("duration", 0))
-			lines.append(f"**{i}.** {t} `[{dur}]`")
-		embed.description = "\n".join(lines)
-		embeds.append(embed)
+		start = page * _TRACKS_PER_PAGE
+		lines = [
+			f"**{i}.** {_truncate(track.get('title', 'Unknown Title'), _QUEUE_TITLE_LIMIT)} `[{format_duration(track.get('duration'))}]`"
+			for i, track in enumerate(items[start:start + _TRACKS_PER_PAGE], start=start + 1)
+		]
+		embeds.append(discord.Embed(
+			title=f"📝 キューリスト ({page + 1}/{total_pages}ページ)",
+			description="\n".join(lines),
+			color=_BLUE,
+		))
 	return embeds

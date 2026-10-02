@@ -1,8 +1,9 @@
 import logging
-import sys
-import os
 import re
+import sys
 from logging.handlers import TimedRotatingFileHandler
+
+from module.options import BASE_DIR
 
 # ==========================================
 # スピナー状態の共有変数 (utils.py と連携)
@@ -14,6 +15,11 @@ spinner_line: str = ""
 
 # コンソールをクリアするためのパディング幅
 _CLEAR_WIDTH = 150
+# ログ出力先ディレクトリとファイル名
+LOG_DIR = BASE_DIR / "log"
+_LOG_FILE_NAME = "bot.log"
+# ログファイルの保持日数
+_LOG_BACKUP_DAYS = 30
 
 class SpinnerAwareHandler(logging.StreamHandler):
 	"""
@@ -54,9 +60,7 @@ def setup_daily_logger() -> None:
 	logフォルダにデイリーローテーションするファイルハンドラと、
 	SpinnerAwareHandlerによるコンソールハンドラを設定する。
 	"""
-	log_dir = "log"
-	if not os.path.exists(log_dir):
-		os.makedirs(log_dir)
+	LOG_DIR.mkdir(parents=True, exist_ok=True)
 	root = logging.getLogger()
 	root.setLevel(logging.INFO)
 	# 重複登録を防ぐため既存ハンドラをクリアする
@@ -68,10 +72,10 @@ def setup_daily_logger() -> None:
 	)
 	# ファイルハンドラ: 全ログを日付ごとのファイルに保存する
 	file_handler = TimedRotatingFileHandler(
-		filename=os.path.join(log_dir, "bot.log"),
+		filename=LOG_DIR / _LOG_FILE_NAME,
 		when="midnight",
 		interval=1,
-		backupCount=30,
+		backupCount=_LOG_BACKUP_DAYS,
 		encoding="utf-8",
 	)
 	file_handler.suffix = "%Y_%m_%d.log"

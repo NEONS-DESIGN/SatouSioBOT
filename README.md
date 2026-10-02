@@ -5,8 +5,7 @@
 <p align="center">
   <a href="https://www.python.org/downloads/release/python-31312/"><img src="https://img.shields.io/badge/Python-v3.13.x-ffde57" alt="/Discord.py"></a>
   <a href="https://github.com/Rapptz/discord.py"><img src="https://img.shields.io/badge/Discord.py-v2.7.1-3498db" alt="/Discord.py"></a>
-  <a href="https://github.com/ellisonleao/pyshorteners/"><img src="https://img.shields.io/badge/pyshorteners-v1.0.1-34495e" alt="/pyshorteners"></a>
-  <a href="https://github.com/yt-dlp/yt-dlp"><img src="https://img.shields.io/badge/yt--dlp-v2026.03.17-FF0000" alt="/yt-dlp"></a>
+  <a href="https://github.com/yt-dlp/yt-dlp"><img src="https://img.shields.io/badge/yt--dlp-v2026.08.19-FF0000" alt="/yt-dlp"></a>
   <a href="https://ffmpeg.org/"><img src="https://img.shields.io/badge/ffmpeg-v8.1-242424" alt="/ffmpeg"></a>
 </p>
 
@@ -68,8 +67,8 @@ max_retries = 3
 max_worker_threads = 4
 # キャッシュの有効期限(秒単位)（大体6時間が限度です。 例: 14400は4時間）
 cache_ttl = 14400
-# ブラウザ偽装の際に渡すカスタムヘッダー（アクセス制限回避用）
-user_agent = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+# yt-dlp に渡す User-Agent（空欄なら yt-dlp 既定の最新ブラウザ UA を使用。通常は空欄推奨）
+user_agent =
 # SQLiteデータベースのファイルパス
 database_path = data.db
 ```
