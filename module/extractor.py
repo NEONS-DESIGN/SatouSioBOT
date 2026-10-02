@@ -2,6 +2,10 @@
 yt-dlp による情報抽出。ProcessPoolExecutor の子プロセス上で実行される。
 子プロセスでの import を軽くするため、discord など Bot 本体側のモジュールには依存しない。
 """
+import multiprocessing
+import multiprocessing.connection
+import os
+import threading
 from typing import Any
 
 from yt_dlp import YoutubeDL
@@ -21,8 +25,24 @@ _OPTIONS: dict[str, dict[str, Any]] = {
 	"stream_fallback": STREAM_FALLBACK_OPTIONS,
 }
 
+# 親プロセスの終了を検知してワーカーを終了させるときの終了コード
+_ORPHAN_EXIT_CODE = 1
+
 # 子プロセスごとに使い回す YoutubeDL インスタンス
 _instances: dict[str, YoutubeDL] = {}
+
+def _exit_when_parent_dies(sentinel: int) -> None:
+	"""親プロセスの終了を待ち、終了したらこのワーカーを即時終了する (監視スレッドで実行)"""
+	multiprocessing.connection.wait([sentinel])
+	# 親が close() を経ずに落ちた場合、ワーカーは自分では終了しないため強制的に終了する
+	os._exit(_ORPHAN_EXIT_CODE)
+
+def _start_parent_watchdog() -> None:
+	"""親プロセスの監視スレッドを起動する (親が無い場合は何もしない)"""
+	parent = multiprocessing.parent_process()
+	if parent is None:
+		return
+	threading.Thread(target=_exit_when_parent_dies, args=(parent.sentinel,), name="parent-watchdog", daemon=True).start()
 
 def _get_ydl(mode: str) -> YoutubeDL:
 	"""mode に対応する YoutubeDL を返す (未生成なら生成する)"""
@@ -32,7 +52,8 @@ def _get_ydl(mode: str) -> YoutubeDL:
 	return ydl
 
 def init_worker() -> None:
-	"""子プロセス起動時の初期化。YoutubeDL の生成と Cookie の読み込みを済ませて初回抽出を速くする"""
+	"""子プロセス起動時の初期化。親の監視を開始し、YoutubeDL の生成と Cookie の読み込みを済ませて初回抽出を速くする"""
+	_start_parent_watchdog()
 	for mode in _OPTIONS:
 		ydl = _get_ydl(mode)
 		try:
