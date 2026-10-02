@@ -49,13 +49,15 @@ def _truncate(text: str, limit: int) -> str:
 	"""limit 文字を超える場合は末尾を "..." にして切り詰める"""
 	return text if len(text) <= limit else text[:limit - 3] + "..."
 
-def _title_link(title: str, url: str | None) -> str:
-	"""[タイトル](URL) 形式のリンクを返す。フィールド上限を超える場合はタイトルのみにする"""
+def _title_link(title: str, url: str | None, limit: int = _FIELD_VALUE_LIMIT) -> str:
+	"""[タイトル](URL) 形式のリンクを返す。limit 文字を超える場合はタイトルのみにする"""
 	if url:
-		link = f"[{title}]({url})"
-		if len(link) <= _FIELD_VALUE_LIMIT:
+		# タイトル中の角括弧と URL 中の丸括弧はリンク記法を壊すためエスケープする
+		text = title.replace("[", "\\[").replace("]", "\\]")
+		link = f"[{text}]({url.replace('(', '%28').replace(')', '%29')})"
+		if len(link) <= limit:
 			return link
-	return _truncate(title, _FIELD_VALUE_LIMIT)
+	return _truncate(title, limit)
 
 def _set_requester_footer(embed: discord.Embed, ctx: commands.Context) -> None:
 	"""Embed のフッターにリクエスト者を表示する"""
@@ -276,8 +278,18 @@ async def limit_updated_embed(ctx: commands.Context, target: str, limit: int) ->
 # ==========================================
 # キューリスト表示
 # ==========================================
+def _queue_line(index: int, track: dict, with_link: bool) -> str:
+	"""キューリストの1行 (番号・タイトル・再生時間) を返す。with_link なら タイトルに URL を埋め込む"""
+	title = _truncate(track.get("title", "Unknown Title"), _QUEUE_TITLE_LIMIT)
+	if with_link:
+		title = _title_link(title, track.get("url"))
+	return f"**{index}.** {title} `[{format_duration(track.get('duration'))}]`"
+
 def queue_list_pages(queue: Iterable[dict]) -> list[discord.Embed]:
-	"""キューの内容を _TRACKS_PER_PAGE 曲ずつのページ Embed リストにする"""
+	"""
+	キューの内容を _TRACKS_PER_PAGE 曲ずつのページ Embed リストにする。
+	- タイトルには URL を埋め込む。説明文の上限を超える行はタイトルのみにする
+	"""
 	items = list(queue)
 	if not items:
 		return [discord.Embed(title="📝 キューリスト", description="キューは空です。", color=_BLUE)]
@@ -285,10 +297,15 @@ def queue_list_pages(queue: Iterable[dict]) -> list[discord.Embed]:
 	embeds: list[discord.Embed] = []
 	for page in range(total_pages):
 		start = page * _TRACKS_PER_PAGE
-		lines = [
-			f"**{i}.** {_truncate(track.get('title', 'Unknown Title'), _QUEUE_TITLE_LIMIT)} `[{format_duration(track.get('duration'))}]`"
-			for i, track in enumerate(items[start:start + _TRACKS_PER_PAGE], start=start + 1)
-		]
+		lines: list[str] = []
+		used = 0
+		for i, track in enumerate(items[start:start + _TRACKS_PER_PAGE], start=start + 1):
+			line = _queue_line(i, track, with_link=True)
+			# 改行1文字分を含めて上限を超えるならリンク無しの行にする
+			if used + len(line) + 1 > _DESCRIPTION_LIMIT:
+				line = _queue_line(i, track, with_link=False)
+			lines.append(line)
+			used += len(line) + 1
 		embeds.append(discord.Embed(
 			title=f"📝 キューリスト ({page + 1}/{total_pages}ページ)",
 			description="\n".join(lines),
