@@ -79,7 +79,8 @@ database_path = data.db
 ```bash
 python main.py
 ```
-または、start.batを起動してください。
+または、start.batをダブルクリックしてください。PowerShellのウィンドウで起動します。(PowerShell 7 があれば優先して使用し、無ければ Windows PowerShell を使用します)
+PowerShellから直接起動する場合は `.\start.ps1` を実行してください。
 
 ---
 
