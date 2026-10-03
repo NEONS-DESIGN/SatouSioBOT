@@ -21,8 +21,9 @@ from module.embed import (
 )
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
-	SPEED_MAX, SPEED_MIN, apply_audio_settings, discard_player, get_player, play_music, requeue_track,
-	server_music_data, shutdown_process_pool, spawn, update_alone_timer, warmup_process_pool,
+	SPEED_MAX, SPEED_MIN, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player,
+	mark_rtp_idle, monitor_loop_lag, play_music, requeue_track, server_music_data, shutdown_process_pool, spawn,
+	update_alone_timer, warmup_process_pool,
 )
 from module.options import BASE_DIR
 from module.priority import Priority, set_priority
@@ -61,6 +62,7 @@ class SatouSioBot(commands.Bot):
 		"""起動時の非同期セットアップ: DB初期化 → 抽出ワーカー準備(並行) → 設定コマンド登録 → スラッシュコマンド同期"""
 		await init_db()
 		spawn(warmup_process_pool(), name="warmup_process_pool")
+		spawn(monitor_loop_lag(), name="loop_lag_monitor")
 		setup_setting_commands(self)
 		synced = await self.tree.sync()
 		if help_command := discord.utils.get(synced, name="help"):
@@ -374,6 +376,7 @@ async def bot_pause(ctx: commands.Context) -> None:
 	if not vc.is_playing():
 		return await not_playing_embed(ctx)
 	vc.pause()
+	mark_rtp_idle(ctx.guild.id)
 	await pause_embed(ctx)
 
 @bot.hybrid_command(name="resume", description="一時停止中の曲を再開します。")
@@ -387,6 +390,9 @@ async def bot_resume(ctx: commands.Context) -> None:
 		return await already_playing_embed(ctx)
 	if not vc.is_paused():
 		return await not_playing_embed(ctx)
+	if isinstance(vc.source, YTDLSource):
+		vc.source.reset_timing()
+	advance_rtp_timestamp(vc)
 	vc.resume()
 	await resume_embed(ctx)
 

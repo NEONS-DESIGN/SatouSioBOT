@@ -73,7 +73,7 @@ def setup_daily_logger() -> None:
 	if root.hasHandlers():
 		root.handlers.clear()
 	formatter = logging.Formatter(
-		fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+		fmt="%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s",
 		datefmt="%Y-%m-%d %H:%M:%S",
 	)
 	# ファイルハンドラ: 全ログを日付ごとのファイルに保存する

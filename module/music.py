@@ -46,6 +46,18 @@ OUTPUT_SAMPLE_RATE = discord.opus.Encoder.SAMPLING_RATE
 SOURCE_SWAP_GRACE = 0.2
 # Ogg Opus の先頭に付くヘッダパケット (音声データではないため送信しない)
 _OPUS_HEADER_PREFIXES = (b"OpusHead", b"OpusTags")
+# 再生の途切れ検出: read() の所要時間、または前回の read() からの遅れがこの秒数を超えたら警告する
+AUDIO_STALL_THRESHOLD = 0.06
+# 再生タイミングの集計間隔(秒)。debug 有効時にこの間隔で最大値を出力する
+AUDIO_STATS_INTERVAL = 10.0
+# read() の間隔がこの秒数未満なら、遅れを取り戻すためのまとめ送りとみなす
+AUDIO_BURST_GAP = 0.005
+# イベントループの遅延監視: 確認間隔(秒) と、警告する遅延(秒)
+LOOP_LAG_CHECK_INTERVAL = 0.1
+LOOP_LAG_THRESHOLD = 0.05
+# RTP タイムスタンプが 1 秒に進む量 (Opus は 48kHz) と、32bit で一周する値
+RTP_CLOCK_RATE = discord.opus.Encoder.SAMPLING_RATE
+RTP_TIMESTAMP_MOD = 1 << 32
 
 # ==========================================
 # バックグラウンドタスク管理
@@ -69,6 +81,15 @@ def spawn(coro: Coroutine[Any, Any, Any], *, name: str | None = None, log_errors
 			logger.error(f"バックグラウンドタスク {t.get_name()} で例外: {exc!r}")
 	task.add_done_callback(_on_done)
 	return task
+
+async def monitor_loop_lag() -> None:
+	"""イベントループ (メインスレッド) の遅延を監視し、しきい値を超えたら警告する。再生の途切れと同時刻かで原因を切り分ける"""
+	while True:
+		started = time.perf_counter()
+		await asyncio.sleep(LOOP_LAG_CHECK_INTERVAL)
+		lag = time.perf_counter() - started - LOOP_LAG_CHECK_INTERVAL
+		if lag > LOOP_LAG_THRESHOLD:
+			logger.warning(f"[STALL] イベントループが {lag * 1000:.0f}ms 遅延")
 
 # ==========================================
 # yt-dlp 情報取得 (プロセス分離 + キャッシュ)
@@ -352,6 +373,7 @@ def get_player(guild_id: int) -> GuildMusicPlayer:
 
 def discard_player(guild_id: int) -> None:
 	"""プレイヤーを登録解除してクリーンアップする (存在しなければ何もしない)"""
+	_rtp_idle_since.pop(guild_id, None)
 	if player := server_music_data.pop(guild_id, None):
 		player.cleanup()
 
@@ -423,6 +445,12 @@ class YTDLSource(discord.FFmpegOpusAudio):
 		self.position = start
 		self._primed: bytes | None = None
 		self._in_header = True
+		self._last_read_end: float | None = None
+		self._clock_start: float | None = None
+		self._frames = 0
+		self._stats_start = 0.0
+		self._max_read = self._max_gap = self._max_late = 0.0
+		self._bursts = 0
 
 	def _read_packet(self) -> bytes:
 		"""次の Opus パケットを返す (先頭のヘッダパケットは読み飛ばす)。終端・失敗時は b"" """
@@ -448,11 +476,52 @@ class YTDLSource(discord.FFmpegOpusAudio):
 
 	def read(self) -> bytes:
 		"""次の 20ms 分の Opus パケットを返し、元音源での再生位置を進める"""
+		started = time.perf_counter()
 		data = self._primed if self._primed is not None else self._read_packet()
 		self._primed = None
+		finished = time.perf_counter()
 		if data:
 			self.position += FRAME_SECONDS * self.speed
+			self._record_timing(started, finished)
+		self._last_read_end = finished
 		return data
+
+	def reset_timing(self) -> None:
+		"""タイミング計測の基準をリセットする (一時停止の間を遅延として数えないよう、再開時に呼ぶ)"""
+		self._last_read_end = None
+		self._clock_start = None
+
+	def _record_timing(self, started: float, finished: float) -> None:
+		"""
+		read() のタイミングを記録する。送信が途切れるほどの停止は WARNING、AUDIO_STATS_INTERVAL ごとの最大値は DEBUG で出力する。
+		- read() が遅い: FFmpeg の出力 (通信) 待ち、または GIL 待ち
+		- read() の間隔が空く: 再生スレッドに CPU / GIL が回ってこない、または送信が遅い
+		- 予定時刻からの遅れ: 「最初の read() + 20ms × 回数」からの遅れ。discord.py は遅れた分を待たずにまとめて送る
+		"""
+		read_time = finished - started
+		gap = started - self._last_read_end if self._last_read_end is not None else FRAME_SECONDS
+		if self._clock_start is None:
+			self._clock_start = self._stats_start = started
+			self._frames = 0
+		late = started - (self._clock_start + self._frames * FRAME_SECONDS)
+		self._frames += 1
+		if read_time > AUDIO_STALL_THRESHOLD:
+			logger.warning(f"[STALL] read() が {read_time * 1000:.0f}ms 停止 (FFmpeg 出力待ち): {self.title}")
+		if gap > FRAME_SECONDS + AUDIO_STALL_THRESHOLD:
+			logger.warning(f"[STALL] 再生スレッドが {gap * 1000:.0f}ms 遅延 (read() の間隔): {self.title}")
+		self._max_read = max(self._max_read, read_time)
+		self._max_gap = max(self._max_gap, gap)
+		self._max_late = max(self._max_late, late)
+		if gap < AUDIO_BURST_GAP:
+			self._bursts += 1
+		if started - self._stats_start >= AUDIO_STATS_INTERVAL:
+			logger.debug(
+				f"[AUDIO] read 最大 {self._max_read * 1000:.1f}ms / 間隔 最大 {self._max_gap * 1000:.1f}ms / "
+				f"予定からの遅れ 最大 {self._max_late * 1000:.1f}ms / まとめ送り {self._bursts} 回: {self.title}"
+			)
+			self._stats_start = started
+			self._max_read = self._max_gap = self._max_late = 0.0
+			self._bursts = 0
 
 def _open_source(track: dict, volume: float, speed: float, keep_pitch: bool, start: float = 0.0) -> YTDLSource:
 	"""YTDLSource を生成して最初のフレームまで読み込む。音声が得られなければ例外。ブロッキングのためイベントループ外で呼ぶ"""
@@ -486,10 +555,30 @@ async def _notify(coro: Coroutine[Any, Any, T]) -> T | None:
 		logger.warning(f"通知メッセージの送信に失敗しました: {e}")
 		return None
 
+# ギルドごとに、送信が止まった時刻 (time.perf_counter()) を保持する
+_rtp_idle_since: dict[int, float] = {}
+
+def mark_rtp_idle(guild_id: int) -> None:
+	"""送信が止まった時刻を記録する。曲の終了時・一時停止時に呼ぶ"""
+	_rtp_idle_since[guild_id] = time.perf_counter()
+
+def advance_rtp_timestamp(vc: discord.VoiceClient) -> None:
+	"""
+	送信が止まっていた時間の分だけ RTP タイムスタンプを進める。送信を再開する直前に呼ぶ。
+	discord.py はパケットごとに 20ms 分しか進めないため、止まった後の最初のパケットを受信側は「止まっていた時間だけ遅れて届いた」と判断し、
+	ジッターバッファを伸ばして (遅く聞こえる) から縮める (速く聞こえる)。実時間に合わせて進めると無音区間として扱われる
+	"""
+	since = _rtp_idle_since.pop(vc.guild.id, None)
+	if since is None:
+		return
+	elapsed = round((time.perf_counter() - since) * RTP_CLOCK_RATE)
+	vc.timestamp = (vc.timestamp + elapsed) % RTP_TIMESTAMP_MOD
+
 def _make_after_callback(ctx: commands.Context, loop: asyncio.AbstractEventLoop):
 	"""再生終了時 (再生スレッドから呼ばれる) に次曲の再生をイベントループへ投げるコールバックを返す"""
 	guild_id = ctx.guild.id
 	def _after_playing(error: Exception | None) -> None:
+		mark_rtp_idle(guild_id)
 		if error:
 			logger.error(f"再生時エラー (ギルド {guild_id}): {error}")
 		# 終了処理でループが閉じた後に呼ばれた場合は何もしない
@@ -597,6 +686,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 			await asyncio.to_thread(source.cleanup)
 			return
 		try:
+			advance_rtp_timestamp(vc)
 			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop()))
 		except Exception as e:
 			logger.error(f"再生開始エラー (ギルド {guild.id}): {e}")
