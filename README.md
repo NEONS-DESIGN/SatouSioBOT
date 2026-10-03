@@ -130,6 +130,10 @@ max_worker_threads = 4
 cache_ttl = 14400
 # yt-dlp に渡す User-Agent（空欄なら yt-dlp 既定の最新ブラウザ UA を使用。通常は空欄推奨）
 user_agent =
+# Firefox でログインしている YouTube アカウントが Premium 会員か（yes / no / auto）
+# yes か no を指定すると、判定のための通信を省いて曲の読み込みが速くなる。auto は毎回自動で判定する（低速）
+# 実際と異なる値にすると音質の低下や再生失敗の原因になるため、不明なら auto のままにする
+youtube_premium = auto
 # SQLiteデータベースのファイルパス（相対パスは main.py のフォルダ基準）
 database_path = data.db
 ```
@@ -143,6 +147,7 @@ database_path = data.db
 | `max_worker_threads` | `4` | 1以上 | yt-dlp で曲を解析する子プロセスの数 (同時に解析できる曲数) |
 | `cache_ttl` | `14400` | 0以上 | 曲名検索・プレイリストの結果をキャッシュする秒数 |
 | `user_agent` | (空欄) | - | yt-dlp に渡す User-Agent。空欄なら yt-dlp の既定値を使用 |
+| `youtube_premium` | `auto` | yes / no / auto | ログイン中の YouTube アカウントが Premium 会員か。yes / no を指定すると YouTube の曲の読み込みが約1.3秒速くなる。auto は毎回自動判定。実際と異なる値にすると、音質の低下 (Premium 会員で no) や再生失敗 (非会員で yes) の原因になりうる |
 | `database_path` | `data.db` | - | SQLiteデータベースの保存先 (相対パスは `main.py` のフォルダ基準) |
 
 ---

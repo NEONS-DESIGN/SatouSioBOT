@@ -25,6 +25,16 @@ def _normalize_user_agent(value: str) -> str:
 		value = value[len(prefix):].strip()
 	return value
 
+# youtube_premium で「自動判定」を表す値
+PREMIUM_AUTO = "auto"
+
+def _parse_premium(value: str) -> bool | None:
+	"""youtube_premium の値を True/False に変換する。auto・解釈できない値は None (yt-dlp の自動判定)"""
+	value = value.strip().lower()
+	if value == PREMIUM_AUTO:
+		return None
+	return configparser.ConfigParser.BOOLEAN_STATES.get(value)
+
 class Config:
 	"""config.ini の [MusicBot] セクションを読み込む。キー欠落・型不正・ファイル欠落時はデフォルト値を使う"""
 	def __init__(self) -> None:
@@ -37,6 +47,8 @@ class Config:
 		self.MAX_RETRIES: int = max(self._get("max_retries", 3, int), 1)
 		self.MAX_WORKER_THREADS: int = max(self._get("max_worker_threads", 4, int), 1)
 		self.CACHE_TTL: int = max(self._get("cache_ttl", 14400, int), 0)
+		# Cookie のアカウントが YouTube Premium か。None なら yt-dlp が初期データから判定する
+		self.YOUTUBE_PREMIUM: bool | None = _parse_premium(self._get("youtube_premium", PREMIUM_AUTO))
 
 	@staticmethod
 	def _get(key: str, default: Any, value_type: type = str) -> Any:
