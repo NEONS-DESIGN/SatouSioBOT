@@ -4,7 +4,7 @@ import shutil
 import sys
 import unicodedata
 from collections.abc import Awaitable
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 from module.color import Color
 import module.logger as _logger_module
@@ -13,7 +13,16 @@ T = TypeVar("T")
 
 # スピナーの描画間隔(秒)
 _SPINNER_INTERVAL = 0.2
-_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+class _SpinnerSymbols(NamedTuple):
+	"""スピナーのアニメーション記号と結果行の記号"""
+	frames: tuple[str, ...]
+	success: str
+	failure: str
+
+_UNICODE_SYMBOLS = _SpinnerSymbols(("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"), "✓", "✗")
+# コンソールが cp932 など点字やチェック記号を表せない文字コードのときに使う記号
+_ASCII_SYMBOLS = _SpinnerSymbols(("|", "/", "-", "\\"), "v", "x")
 _SPINNER_COLORS = (Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA)
 
 # スピナー行の装飾 (メッセージの前の "[⠋] " と後ろの "...") の表示幅
@@ -51,6 +60,26 @@ def _spinner_message(message: str) -> str:
 	# 最終列まで書くと端末によっては次の行へ送られるため、1 列空ける
 	return _fit_width(message, columns - _SPINNER_DECORATION_WIDTH - 1)
 
+def _spinner_symbols() -> _SpinnerSymbols:
+	"""標準出力の文字コードで表せる記号の組を返す (表せなければ ASCII の記号にする)"""
+	encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+	try:
+		"".join((*_UNICODE_SYMBOLS.frames, _UNICODE_SYMBOLS.success, _UNICODE_SYMBOLS.failure)).encode(encoding)
+	except (UnicodeError, LookupError):
+		return _ASCII_SYMBOLS
+	return _UNICODE_SYMBOLS
+
+def _console_write(text: str) -> None:
+	"""
+	スピナーの表示をコンソールに書く。
+	表示は補助的なものなので、書き込みに失敗しても待っている処理を止めないよう例外を握りつぶす
+	"""
+	try:
+		sys.stdout.write(text)
+		sys.stdout.flush()
+	except (OSError, ValueError, UnicodeError):
+		pass
+
 def _spinner_finished(line: str) -> None:
 	"""スピナー1つの終了処理。全スピナーが止まったら共有フラグを下げ、結果行を出力する"""
 	global _active_spinners
@@ -58,18 +87,19 @@ def _spinner_finished(line: str) -> None:
 	if _active_spinners == 0:
 		_logger_module.spinner_active = False
 		_logger_module.spinner_line = ""
-	sys.stdout.write(f"{_logger_module.ERASE_LINE}{line}{Color.RESET}\n")
-	sys.stdout.flush()
+	_console_write(f"{_logger_module.ERASE_LINE}{line}{Color.RESET}\n")
 
 async def loading_spinner(awaitable: Awaitable[T], message: str = "処理中") -> T:
 	"""
 	awaitable の完了を待つ間、コンソールにローディングアニメーションを表示して結果を返す。
 	- 動作中は logger.spinner_active / spinner_line を更新し、SpinnerAwareHandler にログ割り込み時の再描画を委譲する
 	- 完了・キャンセル・例外の各ケースで結果行を出力する (例外は再送出する)
+	- 表示の失敗 (文字コード等) は awaitable の結果に影響させない
 	"""
 	global _active_spinners
 	task = asyncio.ensure_future(awaitable)
-	frames = itertools.cycle(_SPINNER_FRAMES)
+	symbols = _spinner_symbols()
+	frames = itertools.cycle(symbols.frames)
 	colors = itertools.cycle(_SPINNER_COLORS)
 	_active_spinners += 1
 	_logger_module.spinner_active = True
@@ -78,8 +108,7 @@ async def loading_spinner(awaitable: Awaitable[T], message: str = "処理中") -
 			line = f"{_logger_module.ERASE_LINE}{next(colors)}[{next(frames)}] {_spinner_message(message)}...{Color.RESET}"
 			# SpinnerAwareHandler が再描画に使えるよう現在行を共有する
 			_logger_module.spinner_line = line
-			sys.stdout.write(line)
-			sys.stdout.flush()
+			_console_write(line)
 			# タスク完了か描画間隔のどちらか早い方で次へ進む (完了を最大 0.2 秒待たせない)
 			await asyncio.wait((task,), timeout=_SPINNER_INTERVAL)
 		result = task.result()
@@ -88,9 +117,9 @@ async def loading_spinner(awaitable: Awaitable[T], message: str = "処理中") -
 		_spinner_finished(f"{Color.YELLOW}[!] {message} キャンセル")
 		raise
 	except Exception as e:
-		_spinner_finished(f"{Color.RED}[✗] {message} 失敗: {e}")
+		_spinner_finished(f"{Color.RED}[{symbols.failure}] {message} 失敗: {e}")
 		raise
-	_spinner_finished(f"{Color.GREEN}[✓] {message} 完了!")
+	_spinner_finished(f"{Color.GREEN}[{symbols.success}] {message} 完了!")
 	return result
 
 def format_duration(duration: float | None) -> str:

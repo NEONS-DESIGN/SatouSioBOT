@@ -24,6 +24,24 @@ _LOG_FILE_NAME = "bot.log"
 _LOG_BACKUP_DAYS = 30
 # Bot 本体のロガー名
 BOT_LOGGER_NAME = "MusicBot"
+# コンソールの文字コードで表せない文字の扱い (例外にせず "?" に置き換える)
+_CONSOLE_ENCODE_ERRORS = "replace"
+
+def _tolerate_console_encoding() -> None:
+	"""
+	標準出力・標準エラーを、文字コードで表せない文字があっても例外にしない設定にする。
+	出力をパイプやファイルにリダイレクトすると cp932 になり、スピナー記号や曲名の絵文字で
+	UnicodeEncodeError が起きて処理そのものが止まるため
+	"""
+	for stream in (sys.stdout, sys.stderr):
+		reconfigure = getattr(stream, "reconfigure", None)
+		if reconfigure is None:
+			continue
+		try:
+			reconfigure(errors=_CONSOLE_ENCODE_ERRORS)
+		except (ValueError, OSError):
+			# 既に閉じられている・書き込み途中などで変更できない場合は元の設定のまま使う
+			pass
 
 class SpinnerAwareHandler(logging.StreamHandler):
 	"""
@@ -62,9 +80,11 @@ def setup_daily_logger() -> None:
 	"""
 	logフォルダにデイリーローテーションするファイルハンドラと、
 	SpinnerAwareHandlerによるコンソールハンドラを設定する。
+	- コンソール出力は表せない文字を置き換え、文字コードの違いで例外にしない
 	- Bot 本体のロガーは config の debug が True のときだけ DEBUG (計測・内部処理の詳細) まで出す
 	- ライブラリ (discord 等) は常に INFO 以上
 	"""
+	_tolerate_console_encoding()
 	LOG_DIR.mkdir(parents=True, exist_ok=True)
 	root = logging.getLogger()
 	root.setLevel(logging.INFO)
