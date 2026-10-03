@@ -9,7 +9,7 @@ from module.options import app_config
 logger = get_bot_logger()
 
 # ギルド設定として更新を許可するカラム (SQL へ埋め込むためホワイトリストで制限する)
-_SETTING_COLUMNS = frozenset({"volume", "queue_limit", "playlist_limit"})
+_SETTING_COLUMNS = frozenset({"volume", "queue_limit", "playlist_limit", "alone_timeout"})
 
 # 永続コネクションとロック (モジュールレベルのシングルトン)
 _connection: aiosqlite.Connection | None = None
@@ -22,10 +22,15 @@ class GuildSettings(NamedTuple):
 	volume: float
 	queue_limit: int
 	playlist_limit: int
+	# 聴者がいなくなってから自動退出するまでの秒数 (0 は自動退出しない)
+	alone_timeout: int
 
 def _default_settings() -> GuildSettings:
 	"""config.ini 由来のデフォルト設定を返す"""
-	return GuildSettings(app_config.DEFAULT_VOLUME, app_config.DEFAULT_QUEUE_LIMIT, app_config.DEFAULT_PLAYLIST_LIMIT)
+	return GuildSettings(
+		app_config.DEFAULT_VOLUME, app_config.DEFAULT_QUEUE_LIMIT,
+		app_config.DEFAULT_PLAYLIST_LIMIT, app_config.DEFAULT_ALONE_TIMEOUT,
+	)
 
 async def _get_connection() -> aiosqlite.Connection:
 	"""永続的なSQLiteコネクションを返す。初回のみ接続して WAL モードを有効化する"""
@@ -37,7 +42,7 @@ async def _get_connection() -> aiosqlite.Connection:
 		await _connection.execute("PRAGMA journal_mode=WAL;")
 		await _connection.execute("PRAGMA synchronous=NORMAL;")  # WAL時の推奨設定
 		await _connection.commit()
-		logger.info(f"SQLiteに接続しました: {app_config.DATABASE_PATH}")
+		logger.debug(f"SQLiteに接続しました: {app_config.DATABASE_PATH}")
 	return _connection
 
 async def init_db() -> None:
@@ -51,7 +56,8 @@ async def init_db() -> None:
 		"guild_id"       INTEGER PRIMARY KEY UNIQUE NOT NULL,
 		"volume"         REAL    DEFAULT {defaults.volume},
 		"queue_limit"    INTEGER DEFAULT {defaults.queue_limit},
-		"playlist_limit" INTEGER DEFAULT {defaults.playlist_limit}
+		"playlist_limit" INTEGER DEFAULT {defaults.playlist_limit},
+		"alone_timeout"  INTEGER DEFAULT {defaults.alone_timeout}
 	);
 	"""
 	create_bot_admins = """
@@ -65,6 +71,7 @@ async def init_db() -> None:
 	migrate_columns: list[tuple[str, str]] = [
 		("queue_limit",    f'ALTER TABLE "server_data" ADD COLUMN "queue_limit"    INTEGER DEFAULT {defaults.queue_limit};'),
 		("playlist_limit", f'ALTER TABLE "server_data" ADD COLUMN "playlist_limit" INTEGER DEFAULT {defaults.playlist_limit};'),
+		("alone_timeout",  f'ALTER TABLE "server_data" ADD COLUMN "alone_timeout"  INTEGER DEFAULT {defaults.alone_timeout};'),
 	]
 	try:
 		db = await _get_connection()
@@ -79,7 +86,7 @@ async def init_db() -> None:
 					if "duplicate column name" not in str(e).lower():
 						logger.warning(f"[SQLite] {col_name} カラム追加時の予期せぬエラー: {e}")
 			await db.commit()
-		logger.info("[SQLite] データベースの初期化が完了しました。")
+		logger.debug("[SQLite] データベースの初期化が完了しました。")
 	except Exception as e:
 		logger.error(f"[SQLite] データベース初期化エラー: {e}")
 		raise
@@ -93,7 +100,7 @@ async def close_db() -> None:
 			await _connection.close()
 		finally:
 			_connection = None
-			logger.info("[SQLite] 接続を閉じました。")
+			logger.debug("[SQLite] 接続を閉じました。")
 
 async def sql_execution(query: str, params: tuple = ()) -> list | None:
 	"""
@@ -118,7 +125,7 @@ async def get_guild_settings(guild_id: int) -> GuildSettings:
 	"""ギルド設定を返す。未登録・取得失敗時はデフォルト値を返す (NULL のカラムも個別に補う)"""
 	defaults = _default_settings()
 	rows = await sql_execution(
-		"SELECT volume, queue_limit, playlist_limit FROM server_data WHERE guild_id=?;",
+		"SELECT volume, queue_limit, playlist_limit, alone_timeout FROM server_data WHERE guild_id=?;",
 		(guild_id,),
 	)
 	if not rows:

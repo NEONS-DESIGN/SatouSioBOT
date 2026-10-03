@@ -14,7 +14,7 @@ from discord.ext import commands
 from module import extractor
 from module.embed import (
 	music_info_embed, preparing_audio_embed, playlist_added_embed, queue_added_embed,
-	play_completed_embed, load_error_embed, skip_error_embed, playback_error_embed,
+	play_completed_embed, load_error_embed, skip_error_embed, playback_error_embed, alone_leave_embed,
 )
 from module.logger import get_bot_logger, perf
 from module.options import FFMPEG_OPTIONS, app_config
@@ -86,8 +86,8 @@ async def warmup_process_pool() -> None:
 	t = time.perf_counter()
 	try:
 		await asyncio.gather(*(loop.run_in_executor(pool, extractor.ping) for _ in range(app_config.MAX_WORKER_THREADS)))
-		logger.info(f"抽出ワーカー {app_config.MAX_WORKER_THREADS} 件の準備が完了しました。")
-		perf("ワーカー準備", (time.perf_counter() - t) * 1000)
+		logger.debug(f"抽出ワーカー {app_config.MAX_WORKER_THREADS} 件の準備が完了しました。")
+		perf("ワーカー準備", t)
 	except Exception as e:
 		logger.error(f"抽出ワーカーの準備に失敗しました: {e!r}")
 
@@ -137,15 +137,15 @@ async def fetch_track_info(query: str, is_fast: bool) -> dict:
 	- is_fast=True  (メタデータ): CACHE_TTL秒キャッシュする。メタデータは失効しないため安全。
 	- is_fast=False (ストリームURL): キャッシュしない。URL失効による403を避けるため毎回解決する。
 	"""
+	t = time.perf_counter()
 	if is_fast:
 		hit = await _meta_cache.get(query)
 		if hit is not None:
-			perf("メタ取得(cacheヒット)", 0.0)
+			perf("メタ取得(cacheヒット)", t)
 			return hit
-	logger.info(f"{'メタデータの新規取得' if is_fast else 'ストリームURLの解決'}: {query}")
-	t = time.perf_counter()
+	logger.debug(f"{'メタデータの新規取得' if is_fast else 'ストリームURLの解決'}: {query}")
 	info = await _run_extract(query, is_fast)
-	perf("メタ抽出(yt-dlp)" if is_fast else "本抽出(yt-dlp/stream_url)", (time.perf_counter() - t) * 1000)
+	perf("メタ抽出(yt-dlp)" if is_fast else "本抽出(yt-dlp/stream_url)", t)
 	if info.pop(extractor.FALLBACK_FLAG, False):
 		logger.warning(f"高速設定での抽出に失敗したため予備設定で取得しました: {query}")
 	if is_fast:
@@ -220,9 +220,14 @@ class GuildMusicPlayer:
 	- current: 再生中 (または再生準備中) の track
 	- volume: 音量キャッシュ (Noneなら次回再生時にDBから読込、/vol で更新)
 	- speed / keep_pitch: 再生速度とピッチ維持の有無。プレイヤーの破棄 (退出・切断・再生終了) で既定値に戻る
+	- text_channel: 最後に /p が実行されたテキストチャンネル (自動退出の通知先)
+	- alone_task: 聴者不在時の自動退出タイマー (動作中のみ)
 	- advance_lock: 次曲への遷移とソース差し替えを直列化し、二重再生を防ぐ
 	"""
-	__slots__ = ("guild_id", "queue", "loop", "current", "volume", "speed", "keep_pitch", "advance_lock")
+	__slots__ = (
+		"guild_id", "queue", "loop", "current", "volume", "speed", "keep_pitch",
+		"text_channel", "alone_task", "advance_lock",
+	)
 	def __init__(self, guild_id: int) -> None:
 		self.guild_id = guild_id
 		self.queue: collections.deque[dict] = collections.deque()
@@ -231,18 +236,26 @@ class GuildMusicPlayer:
 		self.volume: float | None = None
 		self.speed = 1.0
 		self.keep_pitch = True
+		self.text_channel: discord.abc.Messageable | None = None
+		self.alone_task: asyncio.Task | None = None
 		self.advance_lock = asyncio.Lock()
 	def prefetch(self) -> None:
 		"""キュー先頭 PREFETCH_AHEAD 曲のうち未解決のものについて解決を開始する"""
 		for track in itertools.islice(self.queue, PREFETCH_AHEAD):
 			if not track["stream_url"]:
 				ensure_stream(track)
+	def cancel_alone_timer(self) -> None:
+		"""自動退出タイマーを止める (タイマー自身から呼ばれた場合は取り消さない)"""
+		task, self.alone_task = self.alone_task, None
+		if task is not None and task is not asyncio.current_task():
+			task.cancel()
 	def cleanup(self) -> None:
-		"""進行中の解決タスクを取り消し、全状態を初期化する"""
+		"""進行中の解決タスク・自動退出タイマーを取り消し、全状態を初期化する"""
 		tracks = itertools.chain(self.queue, (self.current,) if self.current else ())
 		for track in tracks:
 			if (task := track["fetch_task"]) is not None and not task.done():
 				task.cancel()
+		self.cancel_alone_timer()
 		self.queue.clear()
 		self.current = None
 
@@ -425,7 +438,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 				player.current = None
 				await _notify(skip_error_embed(ctx, track["title"], edit_msg=wait_msg))
 				continue
-			perf("stream_url待ち", (time.perf_counter() - t_wait) * 1000)
+			perf("stream_url待ち", t_wait)
 		if player.volume is None:
 			player.volume = (await get_guild_settings(guild.id)).volume
 		if _is_stale(guild, player, vc):
@@ -435,7 +448,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 			t_ff = time.perf_counter()
 			# FFmpeg の起動 (CreateProcess) は高負荷時に数十秒ブロックしうるため、イベントループ外で行う
 			source = await asyncio.to_thread(YTDLSource, track, player.volume, speed=player.speed, keep_pitch=player.keep_pitch)
-			perf("FFmpeg起動", (time.perf_counter() - t_ff) * 1000)
+			perf("FFmpeg起動", t_ff)
 			if _is_stale(guild, player, vc):
 				source.cleanup()
 				return
@@ -448,7 +461,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 			await _notify(playback_error_embed(ctx, track["title"]))
 			continue
 		if track["t_request"] is not None:
-			perf("★総計 コマンド→再生開始", (time.perf_counter() - track["t_request"]) * 1000)
+			perf("★総計 コマンド→再生開始", track["t_request"])
 		await music_info_embed(ctx, source, len(player.queue), wait_msg)
 		return
 
@@ -487,7 +500,7 @@ async def apply_speed(guild: discord.Guild, player: GuildMusicPlayer) -> None:
 			return
 		t = time.perf_counter()
 		new = await asyncio.to_thread(_open_primed_source, old.data, old.volume, player.speed, player.keep_pitch, old.position)
-		perf("速度変更(FFmpeg再起動)", (time.perf_counter() - t) * 1000)
+		perf("速度変更(FFmpeg再起動)", t)
 		# 準備中に曲が終わった・切り替わった・切断された場合は破棄する
 		if _is_stale(guild, player, vc) or vc.source is not old or not _is_active(vc):
 			await asyncio.to_thread(new.cleanup)
@@ -499,6 +512,48 @@ async def apply_speed(guild: discord.Guild, player: GuildMusicPlayer) -> None:
 		if was_paused:
 			vc.pause()
 		spawn(_cleanup_later(old), name=f"cleanup_source:{guild.id}")
+
+# ==========================================
+# 聴者不在時の自動退出
+# ==========================================
+def _has_listener(channel: discord.abc.GuildChannel) -> bool:
+	"""チャンネルに Bot 以外のメンバーがいるか。メンバー情報を取得できない場合は誤退出を避けるため「いる」とみなす"""
+	for user_id in channel.voice_states:
+		member = channel.guild.get_member(user_id)
+		if member is None or not member.bot:
+			return True
+	return False
+
+def update_alone_timer(guild: discord.Guild) -> None:
+	"""Bot のいる VC に聴者がいなければ自動退出タイマーを開始し、聴者がいれば止める。VC の人の出入り・移動のたびに呼ぶ"""
+	player = server_music_data.get(guild.id)
+	vc = guild.voice_client
+	if player is None or vc is None or not vc.is_connected() or vc.channel is None:
+		return
+	if _has_listener(vc.channel):
+		player.cancel_alone_timer()
+	elif player.alone_task is None:
+		player.alone_task = spawn(_leave_when_alone(guild, player), name=f"alone_leave:{guild.id}")
+
+async def _leave_when_alone(guild: discord.Guild, player: GuildMusicPlayer) -> None:
+	"""ギルド設定の秒数だけ待ち、それでも聴者がいなければ再生を止めて退出し、通知する (0 秒設定なら何もしない)"""
+	timeout = (await get_guild_settings(guild.id)).alone_timeout
+	if timeout <= 0:
+		player.cancel_alone_timer()
+		return
+	await asyncio.sleep(timeout)
+	player.cancel_alone_timer()
+	vc = guild.voice_client
+	if server_music_data.get(guild.id) is not player or vc is None or not vc.is_connected() or _has_listener(vc.channel):
+		return
+	channel = player.text_channel
+	# /leave と同じく、先にプレイヤーを破棄して停止時の次曲処理を動かさない
+	discard_player(guild.id)
+	vc.stop()
+	await vc.disconnect()
+	logger.debug(f"聴者がいないため ギルド {guild.id} のボイスチャンネルから退出しました。")
+	if channel is not None:
+		await _notify(alone_leave_embed(channel))
 
 async def _await_quietly(task: asyncio.Task | None) -> Any:
 	"""task の完了を待って結果を返す。未指定・失敗時は None (例外は spawn 側でログ済み)"""
@@ -531,6 +586,7 @@ async def play_music(
 	"""
 	guild_id = ctx.guild.id
 	player = get_player(guild_id)
+	player.text_channel = ctx.channel
 	is_idle = _is_idle(player, ctx.guild.voice_client)
 	is_url = query.startswith(("http://", "https://"))
 	is_single_url = is_url and not any(marker in query for marker in PLAYLIST_URL_MARKERS)

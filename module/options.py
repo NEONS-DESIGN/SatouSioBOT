@@ -13,6 +13,8 @@ CONFIG_SECTION = "MusicBot"
 MAX_LIMIT = 50
 # 音量 (倍率) の許容範囲
 VOLUME_RANGE = (0.0, 2.0)
+# 聴者不在時の自動退出までの秒数として設定できる最大値 (0 は自動退出しない)
+ALONE_TIMEOUT_MAX = 600
 
 config_file = configparser.ConfigParser()
 config_file.read(CONFIG_PATH, encoding="utf-8")
@@ -47,6 +49,9 @@ class Config:
 		self.MAX_RETRIES: int = max(self._get("max_retries", 3, int), 1)
 		self.MAX_WORKER_THREADS: int = max(self._get("max_worker_threads", 4, int), 1)
 		self.CACHE_TTL: int = max(self._get("cache_ttl", 14400, int), 0)
+		self.DEFAULT_ALONE_TIMEOUT: int = min(max(self._get("default_alone_timeout", 10, int), 0), ALONE_TIMEOUT_MAX)
+		# True のときのみ所要時間の計測や内部処理の詳細をログに出す
+		self.DEBUG: bool = self._get("debug", False, bool)
 		# Cookie のアカウントが YouTube Premium か。None なら yt-dlp が初期データから判定する
 		self.YOUTUBE_PREMIUM: bool | None = _parse_premium(self._get("youtube_premium", PREMIUM_AUTO))
 
@@ -54,6 +59,8 @@ class Config:
 	def _get(key: str, default: Any, value_type: type = str) -> Any:
 		"""[MusicBot] から key を value_type で取得する。取得できなければ default を返す"""
 		try:
+			if value_type is bool:
+				return config_file.getboolean(CONFIG_SECTION, key)
 			if value_type is int:
 				return config_file.getint(CONFIG_SECTION, key)
 			if value_type is float:

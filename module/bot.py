@@ -22,7 +22,7 @@ from module.embed import (
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
 	SPEED_MAX, SPEED_MIN, apply_speed, discard_player, get_player, play_music, requeue_track,
-	server_music_data, shutdown_process_pool, spawn, warmup_process_pool,
+	server_music_data, shutdown_process_pool, spawn, update_alone_timer, warmup_process_pool,
 )
 from module.options import BASE_DIR
 from module.setting import NotBotAdmin, setup_setting_commands
@@ -58,7 +58,7 @@ class SatouSioBot(commands.Bot):
 		synced = await self.tree.sync()
 		if help_command := discord.utils.get(synced, name="help"):
 			self.help_mention = help_command.mention
-		logger.info("スラッシュコマンドを同期しました。")
+		logger.debug("スラッシュコマンドを同期しました。")
 
 	async def close(self) -> None:
 		"""終了時にプレイヤー・DB接続・プロセスプールを解放する"""
@@ -160,15 +160,22 @@ async def on_message(message: discord.Message) -> None:
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
-	"""BotがVCから切断された際のリソースクリーンアップ"""
-	if member.id != bot.user.id:
+	"""
+	VC の状態変化を処理する。
+	- Bot 自身が切断された: リソースをクリーンアップする
+	- 人の出入り・移動、Bot 自身の移動: 聴者不在による自動退出タイマーを更新する
+	"""
+	guild = member.guild
+	if member.id == bot.user.id:
+		# 切断直後に新しい接続が始まっている場合 (/p による再接続) は、新しいプレイヤーを破棄しない
+		if guild.voice_client is None and before.channel is not None and after.channel is None and guild.id in server_music_data:
+			discard_player(guild.id)
+			logger.debug(f"[CLEANUP] ギルド {guild.id} からBotが切断されたため、リソースをクリーンアップしました。")
+			return
+	elif member.bot:
+		# 他の Bot の出入りは聴者の有無に影響しない
 		return
-	# 切断直後に新しい接続が始まっている場合 (/p による再接続) は、新しいプレイヤーを破棄しない
-	if member.guild.voice_client is not None:
-		return
-	if before.channel is not None and after.channel is None and member.guild.id in server_music_data:
-		discard_player(member.guild.id)
-		logger.info(f"[CLEANUP] ギルド {member.guild.id} からBotが切断されたため、リソースをクリーンアップしました。")
+	update_alone_timer(guild)
 
 def _describe_input_error(error: Exception) -> str:
 	"""引数エラーを利用者向けの日本語説明に変換する"""
@@ -208,7 +215,7 @@ async def _timed(label: str, coro: Coroutine[Any, Any, Any]) -> Any:
 	"""coro を実行し、所要時間を perf ログに出す"""
 	t = time.perf_counter()
 	result = await coro
-	perf(label, (time.perf_counter() - t) * 1000)
+	perf(label, t)
 	return result
 
 async def _connect_voice(channel: discord.VoiceChannel | discord.StageChannel) -> discord.VoiceProtocol:

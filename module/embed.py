@@ -110,6 +110,7 @@ def help_pages() -> list[discord.Embed]:
 	p3.add_field(name="/purge [件数]",                  value="チャンネルのメッセージを一括削除します（管理権限が必要）。", inline=False)
 	p3.add_field(name="/setting admin [add/remove]",   value="BOT操作権限の付与・剥奪を行います。", inline=False)
 	p3.add_field(name="/setting limit [queue/playlist]", value="上限(キュー・プレイリスト)の設定を行います。", inline=False)
+	p3.add_field(name="/setting autoleave [秒数]",       value="聴者がいなくなってから自動で退出するまでの秒数を設定します（0で自動退出しない）。", inline=False)
 
 	return [p1, p2, p3]
 
@@ -136,6 +137,11 @@ async def skip_music_embed(ctx: commands.Context) -> None:
 
 async def play_completed_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "✅ 全てのトラックの再生が終了しました。")
+
+async def alone_leave_embed(channel: discord.abc.Messageable) -> None:
+	"""聴者不在による自動退出の通知。コマンドの応答ではないため ctx ではなくチャンネルへ直接送る"""
+	embed = discord.Embed(title="👋 聴者がいなくなったため再生を停止します", description="ボイスチャンネルから退出しました。", color=_YELLOW)
+	await channel.send(embed=embed)
 
 async def loop_switch_embed(ctx: commands.Context, state: str) -> None:
 	await _send(ctx, f"🔁 ループ再生を {state} にしました。")
@@ -284,6 +290,13 @@ async def guild_only_embed(ctx: commands.Context) -> None:
 
 async def limit_updated_embed(ctx: commands.Context, target: str, limit: int) -> None:
 	await _send(ctx, "✅ 設定更新", f"{target}を **{limit}** 曲に設定しました。", _GREEN)
+
+async def autoleave_updated_embed(ctx: commands.Context, seconds: int) -> None:
+	if seconds == 0:
+		description = "聴者がいなくなっても自動で退出しないように設定しました。"
+	else:
+		description = f"聴者がいなくなってから **{seconds}** 秒後に自動で退出するように設定しました。"
+	await _send(ctx, "✅ 設定更新", description, _GREEN)
 
 
 # ==========================================

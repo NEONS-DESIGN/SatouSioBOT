@@ -1,8 +1,9 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 
-from module.embed import admin_added_embed, admin_removed_embed, limit_updated_embed, setting_help_embed
-from module.options import MAX_LIMIT
+from module.embed import admin_added_embed, admin_removed_embed, autoleave_updated_embed, limit_updated_embed, setting_help_embed
+from module.options import ALONE_TIMEOUT_MAX, MAX_LIMIT
 from module.sqlite import save_guild_setting, sql_execution
 
 class NotBotAdmin(commands.CheckFailure):
@@ -72,3 +73,11 @@ def setup_setting_commands(bot: commands.Bot) -> None:
 	async def limit_playlist(ctx: commands.Context, limit: commands.Range[int, 1, MAX_LIMIT]) -> None:
 		await save_guild_setting(ctx.guild.id, "playlist_limit", limit)
 		await limit_updated_embed(ctx, "プレイリストの取得上限", limit)
+
+	@setting.command(name="autoleave", description=f"聴者がいなくなってから自動で退出するまでの秒数を設定します。(0〜{ALONE_TIMEOUT_MAX}、0で無効)")
+	@app_commands.describe(seconds=f"退出までの秒数 (0〜{ALONE_TIMEOUT_MAX})。0 にすると自動退出しません。")
+	@app_commands.rename(seconds="秒数")
+	@bot_admin_only()
+	async def autoleave(ctx: commands.Context, seconds: commands.Range[int, 0, ALONE_TIMEOUT_MAX]) -> None:
+		await save_guild_setting(ctx.guild.id, "alone_timeout", seconds)
+		await autoleave_updated_embed(ctx, seconds)
