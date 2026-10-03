@@ -42,6 +42,10 @@ SPEED_MIN, SPEED_MAX = 0.5, 3.0
 # 1回の read() で返す音声の長さ(秒) と Discord へ送る音声のサンプリングレート
 FRAME_SECONDS = discord.opus.Encoder.FRAME_LENGTH / 1000
 OUTPUT_SAMPLE_RATE = discord.opus.Encoder.SAMPLING_RATE
+# 曲の残りがこの秒数 (実時間) を切ったら、次の曲の FFmpeg を起動して最初のフレームまで準備しておく
+PRELOAD_LEAD = 15.0
+# 次の曲を準備するタイミングを確認する間隔(秒)
+PRELOAD_CHECK_INTERVAL = 1.0
 # 設定変更でソースを差し替えた後、旧ソースを停止するまでの猶予(秒)。再生スレッドが読み込み中の旧ソースを止めないため
 SOURCE_SWAP_GRACE = 0.2
 # Ogg Opus の先頭に付くヘッダパケット (音声データではないため送信しない)
@@ -58,6 +62,9 @@ LOOP_LAG_THRESHOLD = 0.05
 # RTP タイムスタンプが 1 秒に進む量 (Opus は 48kHz) と、32bit で一周する値
 RTP_CLOCK_RATE = discord.opus.Encoder.SAMPLING_RATE
 RTP_TIMESTAMP_MOD = 1 << 32
+# discord.py が送信を止めるとき (曲の終了・一時停止) に一度に送る無音パケットの数と、それで進む RTP タイムスタンプ
+SILENCE_FRAMES = 5
+SILENCE_SAMPLES = SILENCE_FRAMES * discord.opus.Encoder.SAMPLES_PER_FRAME
 
 # ==========================================
 # バックグラウンドタスク管理
@@ -304,10 +311,15 @@ class GuildMusicPlayer:
 	- alone_task: 聴者不在時の自動退出タイマー (動作中のみ)
 	- prefetch_task: 実行中の先読み (同時に1曲まで)
 	- advance_lock: 次曲への遷移とソース差し替えを直列化し、二重再生を防ぐ
+	- pending_requests: 処理中の /p の件数 (曲の取得に失敗したときに、他の /p を巻き込んで退出しないため)
+	- watch_task: 再生中の曲の残り時間を見て、次の曲を準備するタスク
+	- preload_target / preload_track / preload_task: 準備した次の曲。target は準備の基になった曲 (キュー先頭、またはループ時の現在曲)、
+	  track は実際に再生する track (ループ時は現在曲のコピー)、task は FFmpeg を起動して YTDLSource を返すタスク
 	"""
 	__slots__ = (
 		"guild_id", "queue", "loop", "current", "speed", "keep_pitch",
 		"text_channel", "alone_task", "prefetch_task", "advance_lock",
+		"pending_requests", "watch_task", "preload_target", "preload_track", "preload_task",
 	)
 	def __init__(self, guild_id: int) -> None:
 		self.guild_id = guild_id
@@ -320,6 +332,11 @@ class GuildMusicPlayer:
 		self.alone_task: asyncio.Task | None = None
 		self.prefetch_task: asyncio.Task | None = None
 		self.advance_lock = asyncio.Lock()
+		self.pending_requests = 0
+		self.watch_task: asyncio.Task | None = None
+		self.preload_target: dict | None = None
+		self.preload_track: dict | None = None
+		self.preload_task: asyncio.Task | None = None
 
 	def prefetch(self) -> None:
 		"""
@@ -345,6 +362,13 @@ class GuildMusicPlayer:
 		if server_music_data.get(self.guild_id) is self:
 			self.prefetch()
 
+	def discard_preload(self) -> None:
+		"""準備した次の曲のソースを捨てる。FFmpeg の起動中なら、起動を待ってから停止する"""
+		task, self.preload_task = self.preload_task, None
+		self.preload_target = self.preload_track = None
+		if task is not None:
+			spawn(_close_preloaded(task), name=f"close_preload:{self.guild_id}", log_errors=False)
+
 	def cancel_alone_timer(self) -> None:
 		"""自動退出タイマーを止める (タイマー自身から呼ばれた場合は取り消さない)"""
 		task, self.alone_task = self.alone_task, None
@@ -352,12 +376,16 @@ class GuildMusicPlayer:
 			task.cancel()
 
 	def cleanup(self) -> None:
-		"""進行中の解決タスク・自動退出タイマーを取り消し、全状態を初期化する"""
+		"""進行中の解決タスク・自動退出タイマー・次の曲の準備を取り消し、全状態を初期化する"""
 		tracks = itertools.chain(self.queue, (self.current,) if self.current else ())
 		for track in tracks:
 			if (task := track["fetch_task"]) is not None and not task.done():
 				task.cancel()
 		self.cancel_alone_timer()
+		if self.watch_task is not None:
+			self.watch_task.cancel()
+			self.watch_task = None
+		self.discard_preload()
 		self.queue.clear()
 		self.current = None
 
@@ -562,16 +590,21 @@ def mark_rtp_idle(guild_id: int) -> None:
 	"""送信が止まった時刻を記録する。曲の終了時・一時停止時に呼ぶ"""
 	_rtp_idle_since[guild_id] = time.perf_counter()
 
-def advance_rtp_timestamp(vc: discord.VoiceClient) -> None:
+async def advance_rtp_timestamp(vc: discord.VoiceClient) -> None:
 	"""
 	送信が止まっていた時間の分だけ RTP タイムスタンプを進める。送信を再開する直前に呼ぶ。
 	discord.py はパケットごとに 20ms 分しか進めないため、止まった後の最初のパケットを受信側は「止まっていた時間だけ遅れて届いた」と判断し、
 	ジッターバッファを伸ばして (遅く聞こえる) から縮める (速く聞こえる)。実時間に合わせて進めると無音区間として扱われる
+	- 止めるときに一度に送られた無音パケット (SILENCE_SAMPLES) の分は、すでにタイムスタンプが進んでいるため差し引く
+	- 無音パケットの分の時間がまだ経っていなければ (準備済みの次曲をすぐ流す場合)、経つまで待つ。待たずに送ると、先に届きすぎた分を受信側が早送りで消化する
 	"""
 	since = _rtp_idle_since.pop(vc.guild.id, None)
 	if since is None:
 		return
-	elapsed = round((time.perf_counter() - since) * RTP_CLOCK_RATE)
+	elapsed = round((time.perf_counter() - since) * RTP_CLOCK_RATE) - SILENCE_SAMPLES
+	if elapsed < 0:
+		await asyncio.sleep(-elapsed / RTP_CLOCK_RATE)
+		return
 	vc.timestamp = (vc.timestamp + elapsed) % RTP_TIMESTAMP_MOD
 
 def _make_after_callback(ctx: commands.Context, loop: asyncio.AbstractEventLoop):
@@ -620,6 +653,117 @@ def _is_active(vc: discord.VoiceProtocol | None) -> bool:
 	"""VC で再生中または一時停止中か"""
 	return bool(vc and (vc.is_playing() or vc.is_paused()))
 
+# ==========================================
+# 次の曲の先行準備 (曲の切り替え時の無音を無くす)
+# ==========================================
+def _next_target(player: GuildMusicPlayer) -> dict | None:
+	"""次に再生する曲の基になる track を返す。キュー先頭、キューが空でループ中なら現在の曲。無ければ None"""
+	if player.queue:
+		return player.queue[0]
+	if player.loop and player.current:
+		return player.current
+	return None
+
+def _remaining_seconds(track: dict, source: YTDLSource) -> float | None:
+	"""再生中の曲が終わるまでの実時間(秒) を返す。曲の長さが分からなければ None"""
+	duration = track.get("duration")
+	if not duration:
+		return None
+	return max(0.0, (duration - source.position) / source.speed)
+
+async def _open_preload(player: GuildMusicPlayer, track: dict) -> YTDLSource:
+	"""track のストリームURLを (無ければ) 解決し、現在の設定で FFmpeg を起動して最初のフレームまで読んだソースを返す。FFmpeg の起動に失敗したら URL を捨てる"""
+	if track["stream_url"]:
+		_drop_expiring_stream(track)
+	if not track["stream_url"]:
+		await ensure_stream(track, Priority.NEXT)
+	volume = (await get_guild_settings(player.guild_id)).volume
+	try:
+		return await asyncio.to_thread(_open_source, track, volume, player.speed, player.keep_pitch)
+	except Exception:
+		# URL が失効・拒否されていた可能性があるため、再生時には取得し直させる
+		track.update(stream_url=None, http_headers={}, fetch_task=None)
+		raise
+
+async def _close_preloaded(task: asyncio.Task) -> None:
+	"""準備タスクの完了を待ち、得られたソースの FFmpeg を停止する"""
+	try:
+		source = await task
+	except Exception:
+		return
+	await asyncio.to_thread(source.cleanup)
+
+def _start_preload(player: GuildMusicPlayer, target: dict) -> None:
+	"""target を基に次の曲の準備を始める。ループで現在の曲をもう一度流す場合は、そのためのコピーを準備する"""
+	track = requeue_track(target) if target is player.current else target
+	player.preload_target = target
+	player.preload_track = track
+	player.preload_task = spawn(_open_preload(player, track), name=f"preload:{track['title']}", log_errors=False)
+	logger.debug(f"次の曲の準備を始めました: {track['title']}")
+
+async def _watch_for_preload(guild: discord.Guild, player: GuildMusicPlayer) -> None:
+	"""
+	再生中の曲の残りが PRELOAD_LEAD を切ったら次の曲を準備する。現在の曲が変わる・プレイヤーが破棄されると終わる。
+	- 準備後に次の曲が変わったら (キューの操作・ループの切り替え)、準備し直す
+	- 曲の長さが分からない曲 (ライブ配信など) では準備しない
+	- 一時停止中は準備しない
+	"""
+	current = player.current
+	while server_music_data.get(guild.id) is player and player.current is current:
+		vc = guild.voice_client
+		# 一時停止中は準備しない (待っている間に URL の期限が切れうるため。/pause で準備も捨てる)
+		source = vc.source if vc is not None and vc.is_playing() else None
+		if isinstance(source, YTDLSource):
+			remaining = _remaining_seconds(current, source)
+			if remaining is None:
+				return
+			if remaining <= PRELOAD_LEAD:
+				target = _next_target(player)
+				if player.preload_target is not target:
+					player.discard_preload()
+					if target is not None:
+						_start_preload(player, target)
+		await asyncio.sleep(PRELOAD_CHECK_INTERVAL)
+
+def _start_preload_watch(guild: discord.Guild, player: GuildMusicPlayer) -> None:
+	"""再生を始めた曲について、次の曲を準備するタスクを起動し直す"""
+	if player.watch_task is not None:
+		player.watch_task.cancel()
+	player.watch_task = spawn(_watch_for_preload(guild, player), name=f"preload_watch:{guild.id}")
+
+def _loop_copy(player: GuildMusicPlayer) -> dict:
+	"""ループでキュー末尾に戻す現在の曲のコピーを返す。準備済みのコピーがあればそれを使う"""
+	if player.preload_target is player.current and player.preload_track is not None:
+		return player.preload_track
+	return requeue_track(player.current)
+
+async def _claim_preloaded(player: GuildMusicPlayer, track: dict, volume: float) -> YTDLSource | None:
+	"""
+	track 用に準備したソースを取り出す。準備が無い・別の曲用・設定が変わった・準備に失敗した場合は None (準備は捨てる)
+	- FFmpeg の起動中なら完了を待つ
+	"""
+	task = player.preload_task
+	if task is None or player.preload_track is not track:
+		player.discard_preload()
+		return None
+	player.preload_task = None
+	player.preload_target = player.preload_track = None
+	try:
+		source = await task
+	except asyncio.CancelledError:
+		# 自身ではなく準備タスクだけが取り消された場合 (cleanup 経由) は、準備なしとして扱う
+		if (current_task := asyncio.current_task()) is not None and current_task.cancelling():
+			raise
+		return None
+	except Exception as e:
+		logger.debug(f"次の曲の準備に失敗したため開き直します: {track['title']} ({e!r})")
+		return None
+	if (source.volume, source.speed, source.keep_pitch) != (volume, player.speed, player.keep_pitch):
+		await asyncio.to_thread(source.cleanup)
+		return None
+	logger.debug(f"準備済みのソースで再生します: {track['title']}")
+	return source
+
 async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 	"""play_next_song の本体。advance_lock 取得済みで呼ぶこと"""
 	guild = ctx.guild
@@ -634,7 +778,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 		if _is_active(vc):
 			return
 		if player.loop and player.current:
-			player.queue.append(requeue_track(player.current))
+			player.queue.append(_loop_copy(player))
 		if not player.queue:
 			discard_player(guild.id)
 			await vc.disconnect()
@@ -642,51 +786,61 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 			return
 		track = player.queue.popleft()
 		player.current = track
-		if track["stream_url"]:
-			_drop_expiring_stream(track)
-		# 先読み・使い回しで取得済みの URL か (再生できなければ1回だけ取得し直す)
-		resolved_earlier = bool(track["stream_url"])
 		wait_msg: discord.Message | None = track["wait_msg"]
-		if not track["stream_url"]:
-			if wait_msg is None:
-				wait_msg = await _notify(preparing_audio_embed(ctx))
-			t_wait = time.perf_counter()
-			try:
-				await ensure_stream(track)
-			except asyncio.CancelledError:
-				# 自身ではなく解決タスクだけが取り消された場合 (cleanup 経由) は静かに終了する
-				if (current_task := asyncio.current_task()) is not None and current_task.cancelling():
-					raise
+		# 準備がまだ URL の解決中なら、従来どおり準備中と表示してから待つ
+		preload_task = player.preload_task
+		if player.preload_track is track and preload_task is not None and not preload_task.done() and not track["stream_url"] and wait_msg is None:
+			wait_msg = await _notify(preparing_audio_embed(ctx))
+		# 曲の終わり際に準備しておいたソースがあれば、FFmpeg の起動を待たずに再生する
+		source = await _claim_preloaded(player, track, (await get_guild_settings(guild.id)).volume)
+		if source is None:
+			if track["stream_url"]:
+				_drop_expiring_stream(track)
+			# 先読み・使い回しで取得済みの URL か (再生できなければ1回だけ取得し直す)
+			resolved_earlier = bool(track["stream_url"])
+			if not track["stream_url"]:
+				if wait_msg is None:
+					wait_msg = await _notify(preparing_audio_embed(ctx))
+				t_wait = time.perf_counter()
+				try:
+					await ensure_stream(track)
+				except asyncio.CancelledError:
+					# 自身ではなく解決タスクだけが取り消された場合 (cleanup 経由) は静かに終了する
+					if (current_task := asyncio.current_task()) is not None and current_task.cancelling():
+						raise
+					return
+				except Exception:
+					player.current = None
+					await _notify(skip_error_embed(ctx, track["title"], edit_msg=wait_msg))
+					continue
+				perf("stream_url待ち", t_wait)
+			volume = (await get_guild_settings(guild.id)).volume
+			if _is_stale(guild, player, vc):
 				return
-			except Exception:
+			try:
+				t_ff = time.perf_counter()
+				# FFmpeg の起動 (CreateProcess) と最初のフレームの受信はブロッキングで、高負荷時は数十秒かかりうるためイベントループ外で行う
+				source = await asyncio.to_thread(_open_source, track, volume, player.speed, player.keep_pitch)
+				perf("FFmpeg起動(初回フレームまで)", t_ff)
+			except Exception as e:
 				player.current = None
-				await _notify(skip_error_embed(ctx, track["title"], edit_msg=wait_msg))
+				if resolved_earlier:
+					# 取得済みの URL が失効・拒否されていた可能性があるため、取得し直して同じ曲をもう一度試す
+					logger.warning(f"取得済みのストリームURLで再生できなかったため取得し直します: {track['title']} ({e})")
+					track.update(stream_url=None, http_headers={}, fetch_task=None, wait_msg=wait_msg)
+					player.queue.appendleft(track)
+					continue
+				logger.error(f"再生ソース生成エラー (ギルド {guild.id}): {e}")
+				await _notify(playback_error_embed(ctx, track["title"], edit_msg=wait_msg))
 				continue
-			perf("stream_url待ち", t_wait)
-		volume = (await get_guild_settings(guild.id)).volume
 		if _is_stale(guild, player, vc):
+			await asyncio.to_thread(source.cleanup)
 			return
-		try:
-			t_ff = time.perf_counter()
-			# FFmpeg の起動 (CreateProcess) と最初のフレームの受信はブロッキングで、高負荷時は数十秒かかりうるためイベントループ外で行う
-			source = await asyncio.to_thread(_open_source, track, volume, player.speed, player.keep_pitch)
-			perf("FFmpeg起動(初回フレームまで)", t_ff)
-		except Exception as e:
-			player.current = None
-			if resolved_earlier:
-				# 取得済みの URL が失効・拒否されていた可能性があるため、取得し直して同じ曲をもう一度試す
-				logger.warning(f"取得済みのストリームURLで再生できなかったため取得し直します: {track['title']} ({e})")
-				track.update(stream_url=None, http_headers={}, fetch_task=None, wait_msg=wait_msg)
-				player.queue.appendleft(track)
-				continue
-			logger.error(f"再生ソース生成エラー (ギルド {guild.id}): {e}")
-			await _notify(playback_error_embed(ctx, track["title"], edit_msg=wait_msg))
-			continue
+		await advance_rtp_timestamp(vc)
 		if _is_stale(guild, player, vc):
 			await asyncio.to_thread(source.cleanup)
 			return
 		try:
-			advance_rtp_timestamp(vc)
 			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop()))
 		except Exception as e:
 			logger.error(f"再生開始エラー (ギルド {guild.id}): {e}")
@@ -694,6 +848,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 			player.current = None
 			await _notify(playback_error_embed(ctx, track["title"], edit_msg=wait_msg))
 			continue
+		_start_preload_watch(guild, player)
 		if track["t_request"] is not None:
 			perf("★総計 コマンド→再生開始", track["t_request"])
 		await music_info_embed(ctx, source, len(player.queue), wait_msg)
@@ -712,6 +867,8 @@ async def apply_audio_settings(guild: discord.Guild, player: GuildMusicPlayer) -
 	- 何も再生していなければ何もしない (次の曲から反映される)
 	- 失敗時は例外を送出する (旧ソースはそのまま再生を続ける)
 	"""
+	# 準備済みの次の曲は古い設定で起動しているため捨てる (終わり際なら監視タスクが新しい設定で準備し直す)
+	player.discard_preload()
 	try:
 		async with player.advance_lock:
 			await _swap_source(guild, player)
@@ -797,6 +954,23 @@ def _is_idle(player: GuildMusicPlayer, vc: discord.VoiceProtocol | None) -> bool
 	"""再生中・再生準備中の曲もキューも無い状態か"""
 	return player.current is None and not player.queue and not _is_active(vc)
 
+async def _leave_if_unused(guild: discord.Guild, player: GuildMusicPlayer, voice_task: asyncio.Task | None) -> None:
+	"""
+	曲の取得に失敗したとき、このリクエストで接続 (移動) した VC で何も再生しなければ退出してプレイヤーを破棄する。
+	- 接続処理の途中なら完了を待ってから判定する
+	- 別のリクエストで再生・曲の切り替えが始まっている、または他の /p が処理中なら何もしない
+	"""
+	if voice_task is None:
+		return
+	await _await_quietly(voice_task)
+	vc = guild.voice_client
+	if vc is None or server_music_data.get(guild.id) is not player:
+		return
+	if player.pending_requests > 1 or player.advance_lock.locked() or not _is_idle(player, vc):
+		return
+	discard_player(guild.id)
+	await vc.disconnect()
+
 async def play_music(
 	ctx: commands.Context,
 	query: str,
@@ -804,6 +978,23 @@ async def play_music(
 	defer_task: asyncio.Task | None = None,
 	voice_task: asyncio.Task | None = None,
 	t_request: float | None = None,
+) -> None:
+	"""URLまたは検索クエリの曲をキューに追加して再生する。処理中の /p の件数を数えながら _play_music を実行する"""
+	player = get_player(ctx.guild.id)
+	player.pending_requests += 1
+	try:
+		await _play_music(ctx, player, query, defer_task=defer_task, voice_task=voice_task, t_request=t_request)
+	finally:
+		player.pending_requests -= 1
+
+async def _play_music(
+	ctx: commands.Context,
+	player: GuildMusicPlayer,
+	query: str,
+	*,
+	defer_task: asyncio.Task | None,
+	voice_task: asyncio.Task | None,
+	t_request: float | None,
 ) -> None:
 	"""
 	URLまたは検索クエリを解析してキューに追加し、アイドル状態なら再生を開始する。
@@ -814,7 +1005,6 @@ async def play_music(
 	- 検索クエリ: ytsearch1: でメタデータを取得し、ストリームURLは再生時または先読みで解決する
 	"""
 	guild_id = ctx.guild.id
-	player = get_player(guild_id)
 	player.text_channel = ctx.channel
 	is_idle = _is_idle(player, ctx.guild.voice_client)
 	is_url = query.startswith(("http://", "https://"))
@@ -852,10 +1042,15 @@ async def play_music(
 		logger.error(f"play_music 解析エラー: {e}")
 		await _await_quietly(defer_task)
 		await _notify(load_error_embed(ctx, e, edit_msg=await _await_quietly(wait_task)))
+		await _leave_if_unused(ctx.guild, player, voice_task)
 		return
 
 	await _await_quietly(defer_task)
 	wait_msg: discord.Message | None = await _await_quietly(wait_task)
+	# 解析待ちの間に退出 (/leave・切断・自動退出) でプレイヤーが破棄されていれば、曲を追加せずに知らせる
+	if server_music_data.get(guild_id) is not player:
+		await _notify(load_error_embed(ctx, ValueError("曲の準備中に退出したため、追加できませんでした。"), edit_msg=wait_msg))
+		return
 	# 解析待ちの間に別のリクエストで再生が始まっていれば、キュー追加として扱う
 	start_playback = is_idle and _is_idle(player, ctx.guild.voice_client)
 	if start_playback:

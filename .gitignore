@@ -163,6 +163,7 @@ temp/
 cookies.txt
 serverData.db
 data.db
+command_sync.hash
 auth/state.json
 data.db-wal
 data.db-shm

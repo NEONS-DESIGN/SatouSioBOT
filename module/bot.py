@@ -1,4 +1,6 @@
 import asyncio
+import hashlib
+import json
 import os
 import random
 import sys
@@ -40,6 +42,8 @@ PAGINATOR_JUMP_MIN_PAGES = 3
 PURGE_MAX = 50
 # /vol で指定できる音量(%)の範囲
 VOLUME_MIN, VOLUME_MAX = 1, 200
+# スラッシュコマンドを最後に同期したときの定義のハッシュを保存するファイル
+COMMAND_HASH_FILE = BASE_DIR / "command_sync.hash"
 
 # ==========================================
 # Bot本体
@@ -64,10 +68,44 @@ class SatouSioBot(commands.Bot):
 		spawn(warmup_process_pool(), name="warmup_process_pool")
 		spawn(monitor_loop_lag(), name="loop_lag_monitor")
 		setup_setting_commands(self)
-		synced = await self.tree.sync()
-		if help_command := discord.utils.get(synced, name="help"):
+		registered = await self._sync_commands()
+		if help_command := discord.utils.get(registered, name="help"):
 			self.help_mention = help_command.mention
+
+	def _command_signature(self) -> str:
+		"""スラッシュコマンドの定義と Bot の ID から、前回の同期と同じ内容かを判定するハッシュを返す"""
+		commands_payload = [command.to_dict(self.tree) for command in self.tree.get_commands()]
+		data = json.dumps({"application_id": self.application_id, "commands": commands_payload}, sort_keys=True, ensure_ascii=False)
+		return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+	async def _sync_commands(self) -> list[app_commands.AppCommand]:
+		"""
+		スラッシュコマンドの定義が前回の同期から変わっていれば同期し、登録済みのコマンド一覧を返す。
+		- 変わっていなければ同期せず、登録済みの一覧を取得するだけにする (毎回の同期は起動を遅くし、回数制限にかかりうるため)
+		- 登録済みのコマンド名がローカルと食い違えば (Discord 側で消された等)、または一覧を取得できなければ、定義が同じでも同期し直す
+		- ハッシュの保存に失敗しても起動は続ける (次回の起動で同期し直すだけ)
+		"""
+		signature = self._command_signature()
+		try:
+			previous = COMMAND_HASH_FILE.read_text(encoding="utf-8").strip()
+		except OSError:
+			previous = None
+		if previous == signature:
+			try:
+				registered = await self.tree.fetch_commands()
+			except discord.HTTPException as e:
+				logger.warning(f"登録済みのスラッシュコマンドを取得できなかったため同期します: {e}")
+				registered = None
+			if registered is not None and {command.name for command in registered} == {command.name for command in self.tree.get_commands()}:
+				logger.debug("スラッシュコマンドに変更が無いため同期を省略しました。")
+				return registered
+		synced = await self.tree.sync()
+		try:
+			COMMAND_HASH_FILE.write_text(signature, encoding="utf-8")
+		except OSError as e:
+			logger.warning(f"スラッシュコマンドの同期記録を保存できませんでした: {e}")
 		logger.debug("スラッシュコマンドを同期しました。")
+		return synced
 
 	async def close(self) -> None:
 		"""終了時にプレイヤー・DB接続・プロセスプールを解放する"""
@@ -377,6 +415,9 @@ async def bot_pause(ctx: commands.Context) -> None:
 		return await not_playing_embed(ctx)
 	vc.pause()
 	mark_rtp_idle(ctx.guild.id)
+	# 準備済みの次の曲は、一時停止が長引くと URL の期限が切れうるため捨てる (再開後、終わり際なら準備し直される)
+	if player := server_music_data.get(ctx.guild.id):
+		player.discard_preload()
 	await pause_embed(ctx)
 
 @bot.hybrid_command(name="resume", description="一時停止中の曲を再開します。")
@@ -392,7 +433,7 @@ async def bot_resume(ctx: commands.Context) -> None:
 		return await not_playing_embed(ctx)
 	if isinstance(vc.source, YTDLSource):
 		vc.source.reset_timing()
-	advance_rtp_timestamp(vc)
+	await advance_rtp_timestamp(vc)
 	vc.resume()
 	await resume_embed(ctx)
 
