@@ -1016,6 +1016,7 @@ async def _play_music(
 
 	wait_task = spawn(_send_wait_msg(), name="wait_msg") if is_idle else None
 	settings_task = spawn(get_guild_settings(guild_id), name="guild_settings")
+	early_fetch: asyncio.Task | None = None
 	try:
 		if is_single_url:
 			info = await loading_spinner(fetch_track_info(query, False), "音源の取得")
@@ -1036,10 +1037,16 @@ async def _play_music(
 		if is_single_url and not is_playlist_result and info.get("url"):
 			tracks[0]["stream_url"] = info["url"]
 			tracks[0]["http_headers"] = info.get("http_headers") or {}
+		# 再生を始める見込みなら、1 曲目のストリームURLの解決を今始めておく (VC 接続・応答の保留・待機メッセージの送信を待つと、その分だけ再生開始が遅れるため)。
+		# 再生処理 (_advance) は同じ解決タスクを待つ
+		if is_idle and not tracks[0]["stream_url"]:
+			early_fetch = ensure_stream(tracks[0])
 		if voice_task is not None:
 			await voice_task
 	except Exception as e:
 		logger.error(f"play_music 解析エラー: {e}")
+		if early_fetch is not None:
+			early_fetch.cancel()
 		await _await_quietly(defer_task)
 		await _notify(load_error_embed(ctx, e, edit_msg=await _await_quietly(wait_task)))
 		await _leave_if_unused(ctx.guild, player, voice_task)
@@ -1049,6 +1056,8 @@ async def _play_music(
 	wait_msg: discord.Message | None = await _await_quietly(wait_task)
 	# 解析待ちの間に退出 (/leave・切断・自動退出) でプレイヤーが破棄されていれば、曲を追加せずに知らせる
 	if server_music_data.get(guild_id) is not player:
+		if early_fetch is not None:
+			early_fetch.cancel()
 		await _notify(load_error_embed(ctx, ValueError("曲の準備中に退出したため、追加できませんでした。"), edit_msg=wait_msg))
 		return
 	# 解析待ちの間に別のリクエストで再生が始まっていれば、キュー追加として扱う
