@@ -33,6 +33,13 @@ STREAM_RETRY_DELAY = 2.0
 SEARCH_PREFIX = "ytsearch1:"
 # URL にこれらが含まれる場合はプレイリストとして扱う
 PLAYLIST_URL_MARKERS = ("list=", "playlist")
+# 再生速度の範囲 (FFmpeg の atempo が 1段で扱える下限が 0.5)
+SPEED_MIN, SPEED_MAX = 0.5, 3.0
+# 1回の read() で返す音声の長さ(秒) と Discord へ送る PCM のサンプリングレート
+FRAME_SECONDS = discord.opus.Encoder.FRAME_LENGTH / 1000
+OUTPUT_SAMPLE_RATE = discord.opus.Encoder.SAMPLING_RATE
+# 速度変更でソースを差し替えた後、旧ソースを停止するまでの猶予(秒)。再生スレッドが読み込み中の旧ソースを止めないため
+SOURCE_SWAP_GRACE = 0.2
 
 # ==========================================
 # バックグラウンドタスク管理
@@ -212,15 +219,18 @@ class GuildMusicPlayer:
 	- queue: 再生待ちの track dict
 	- current: 再生中 (または再生準備中) の track
 	- volume: 音量キャッシュ (Noneなら次回再生時にDBから読込、/vol で更新)
-	- advance_lock: 次曲への遷移を直列化し、二重再生を防ぐ
+	- speed / keep_pitch: 再生速度とピッチ維持の有無。プレイヤーの破棄 (退出・切断・再生終了) で既定値に戻る
+	- advance_lock: 次曲への遷移とソース差し替えを直列化し、二重再生を防ぐ
 	"""
-	__slots__ = ("guild_id", "queue", "loop", "current", "volume", "advance_lock")
+	__slots__ = ("guild_id", "queue", "loop", "current", "volume", "speed", "keep_pitch", "advance_lock")
 	def __init__(self, guild_id: int) -> None:
 		self.guild_id = guild_id
 		self.queue: collections.deque[dict] = collections.deque()
 		self.loop = False
 		self.current: dict | None = None
 		self.volume: float | None = None
+		self.speed = 1.0
+		self.keep_pitch = True
 		self.advance_lock = asyncio.Lock()
 	def prefetch(self) -> None:
 		"""キュー先頭 PREFETCH_AHEAD 曲のうち未解決のものについて解決を開始する"""
@@ -254,9 +264,11 @@ def discard_player(guild_id: int) -> None:
 # ==========================================
 # YTDLSource (FFmpeg AudioSource ラッパー)
 # ==========================================
-def _build_before_options(http_headers: dict) -> str:
-	"""FFmpeg の before_options を返す。HTTPヘッダーがあれば -headers を付与する"""
+def _build_before_options(http_headers: dict, start: float = 0.0) -> str:
+	"""FFmpeg の before_options を返す。start 秒からの再生なら -ss、HTTPヘッダーがあれば -headers を付与する"""
 	before_options = FFMPEG_OPTIONS["before_options"]
+	if start > 0:
+		before_options = f"{before_options} -ss {start:.3f}"
 	if not http_headers:
 		return before_options
 	# ヘッダ値に含まれる " や改行はFFmpeg引数を破壊するため除去する
@@ -265,26 +277,64 @@ def _build_before_options(http_headers: dict) -> str:
 	header_str = "".join(f"{key}: {_clean(value)}\r\n" for key, value in http_headers.items())
 	return f'{before_options} -headers "{header_str}"'
 
+def _build_audio_filter(speed: float, keep_pitch: bool) -> str | None:
+	"""
+	再生速度を変える FFmpeg の音声フィルタを返す。等速なら None。
+	- keep_pitch=True : atempo で音の高さを保ったまま速度だけ変える
+	- keep_pitch=False: サンプリングレートを読み替えて、速度と音の高さを同時に変える
+	"""
+	if speed == 1.0:
+		return None
+	if keep_pitch:
+		return f"atempo={speed}"
+	rate = round(OUTPUT_SAMPLE_RATE * speed)
+	return f"aresample={OUTPUT_SAMPLE_RATE},asetrate={rate},aresample={OUTPUT_SAMPLE_RATE}"
+
+def _build_options(speed: float, keep_pitch: bool) -> str:
+	"""FFmpeg の出力側 options を返す。速度変更があれば -af を付与する"""
+	options = FFMPEG_OPTIONS["options"]
+	if audio_filter := _build_audio_filter(speed, keep_pitch):
+		return f"{options} -af {audio_filter}"
+	return options
+
 class YTDLSource(discord.PCMVolumeTransformer):
 	"""
 	解決済み track のストリームURLをFFmpegで再生するAudioSource。
 	- PCMVolumeTransformerを継承してリアルタイム音量調整に対応
+	- speed / keep_pitch で再生速度を変え、start 秒の位置から再生できる
+	- position: 元音源での現在の再生位置(秒)。速度変更時の再開位置に使う
 	- stream_url が無い track では ValueError を送出する
 	"""
-	def __init__(self, track: dict, volume: float) -> None:
+	def __init__(self, track: dict, volume: float, *, speed: float = 1.0, keep_pitch: bool = True, start: float = 0.0) -> None:
 		stream_url = track.get("stream_url")
 		if not stream_url:
 			raise ValueError(f"ストリームURLが存在しません: {track.get('title', 'Unknown')}")
 		source = discord.FFmpegPCMAudio(
 			stream_url,
-			before_options=_build_before_options(track.get("http_headers") or {}),
-			options=FFMPEG_OPTIONS["options"],
+			before_options=_build_before_options(track.get("http_headers") or {}, start),
+			options=_build_options(speed, keep_pitch),
 			stderr=sys.stderr,
 		)
 		super().__init__(source, volume)
 		self.data = track
 		self.title: str = track.get("title", "Unknown Title")
 		self.display_url: str = track.get("url", "")
+		self.speed = speed
+		self.keep_pitch = keep_pitch
+		self.position = start
+		self._primed: bytes | None = None
+
+	def prime(self) -> None:
+		"""最初のフレームを先に読んで保持する (FFmpeg の接続・シークを差し替え前に済ませ、無音を作らない)。ブロッキング"""
+		self._primed = super().read()
+
+	def read(self) -> bytes:
+		"""次の 20ms 分の PCM を返し、元音源での再生位置を進める"""
+		data = self._primed if self._primed is not None else super().read()
+		self._primed = None
+		if data:
+			self.position += FRAME_SECONDS * self.speed
+		return data
 
 # ==========================================
 # 再生制御
@@ -384,7 +434,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 		try:
 			t_ff = time.perf_counter()
 			# FFmpeg の起動 (CreateProcess) は高負荷時に数十秒ブロックしうるため、イベントループ外で行う
-			source = await asyncio.to_thread(YTDLSource, track, player.volume)
+			source = await asyncio.to_thread(YTDLSource, track, player.volume, speed=player.speed, keep_pitch=player.keep_pitch)
 			perf("FFmpeg起動", (time.perf_counter() - t_ff) * 1000)
 			if _is_stale(guild, player, vc):
 				source.cleanup()
@@ -402,6 +452,54 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 		await music_info_embed(ctx, source, len(player.queue), wait_msg)
 		return
 
+def _open_primed_source(track: dict, volume: float, speed: float, keep_pitch: bool, start: float) -> YTDLSource:
+	"""YTDLSource を生成して最初のフレームまで読み込む。ブロッキングのためイベントループ外で呼ぶ"""
+	source = YTDLSource(track, volume, speed=speed, keep_pitch=keep_pitch, start=start)
+	try:
+		source.prime()
+	except Exception:
+		source.cleanup()
+		raise
+	return source
+
+def _is_active(vc: discord.VoiceProtocol | None) -> bool:
+	"""VC で再生中または一時停止中か"""
+	return bool(vc and (vc.is_playing() or vc.is_paused()))
+
+async def _cleanup_later(source: discord.AudioSource) -> None:
+	"""差し替え済みの旧ソースを、再生スレッドが読み終える猶予をおいてから停止する"""
+	await asyncio.sleep(SOURCE_SWAP_GRACE)
+	await asyncio.to_thread(source.cleanup)
+
+async def apply_speed(guild: discord.Guild, player: GuildMusicPlayer) -> None:
+	"""
+	再生中の曲に player の速度設定を反映する。
+	- 現在位置から新しい速度で FFmpeg を起動し直し、最初のフレームが届いてからソースを差し替える (準備中は旧ソースが鳴り続ける)
+	- 何も再生していなければ何もしない (次の曲から反映される)
+	- 失敗時は例外を送出する (旧ソースはそのまま再生を続ける)
+	"""
+	if not _is_active(guild.voice_client):
+		return
+	async with player.advance_lock:
+		vc = guild.voice_client
+		old = vc.source if _is_active(vc) else None
+		if not isinstance(old, YTDLSource) or (old.speed, old.keep_pitch) == (player.speed, player.keep_pitch):
+			return
+		t = time.perf_counter()
+		new = await asyncio.to_thread(_open_primed_source, old.data, old.volume, player.speed, player.keep_pitch, old.position)
+		perf("速度変更(FFmpeg再起動)", (time.perf_counter() - t) * 1000)
+		# 準備中に曲が終わった・切り替わった・切断された場合は破棄する
+		if _is_stale(guild, player, vc) or vc.source is not old or not _is_active(vc):
+			await asyncio.to_thread(new.cleanup)
+			return
+		was_paused = vc.is_paused()
+		# 差し替えは after コールバックを呼ばないため、次の曲へは進まない
+		vc.source = new
+		# set_source は内部で再開するため、一時停止中だった場合は止め直す
+		if was_paused:
+			vc.pause()
+		spawn(_cleanup_later(old), name=f"cleanup_source:{guild.id}")
+
 async def _await_quietly(task: asyncio.Task | None) -> Any:
 	"""task の完了を待って結果を返す。未指定・失敗時は None (例外は spawn 側でログ済み)"""
 	if task is None:
@@ -413,7 +511,7 @@ async def _await_quietly(task: asyncio.Task | None) -> Any:
 
 def _is_idle(player: GuildMusicPlayer, vc: discord.VoiceProtocol | None) -> bool:
 	"""再生中・再生準備中の曲もキューも無い状態か"""
-	return player.current is None and not player.queue and not (vc and (vc.is_playing() or vc.is_paused()))
+	return player.current is None and not player.queue and not _is_active(vc)
 
 async def play_music(
 	ctx: commands.Context,
@@ -491,5 +589,5 @@ async def play_music(
 		await _notify(queue_added_embed(ctx, tracks[0], len(player.queue), edit_msg=wait_msg))
 	# 何も再生されていなければ再生処理を起動する (多重起動しても advance_lock と再生中判定で1つに収束する)
 	vc = ctx.guild.voice_client
-	if start_playback or not (vc and (vc.is_playing() or vc.is_paused())):
+	if start_playback or not _is_active(vc):
 		spawn(play_next_song(ctx), name=f"play_next:{guild_id}")

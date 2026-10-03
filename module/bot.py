@@ -17,12 +17,12 @@ from module.embed import (
 	help_pages, invalid_argument_embed, invalid_clear_range_embed, leave_embed, loop_switch_embed,
 	move_success_embed, not_connect_bot_embed, not_playing_embed, pause_embed, permission_error_embed,
 	purge_complete_embed, queue_list_pages, replay_embed, resume_embed, shuffle_complete_embed,
-	skip_music_embed, user_not_here_embed, volume_set_embed,
+	skip_music_embed, speed_set_embed, user_not_here_embed, volume_set_embed,
 )
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
-	discard_player, get_player, play_music, requeue_track, server_music_data,
-	shutdown_process_pool, spawn, warmup_process_pool,
+	SPEED_MAX, SPEED_MIN, apply_speed, discard_player, get_player, play_music, requeue_track,
+	server_music_data, shutdown_process_pool, spawn, warmup_process_pool,
 )
 from module.options import BASE_DIR
 from module.setting import NotBotAdmin, setup_setting_commands
@@ -258,6 +258,22 @@ async def bot_volume(ctx: commands.Context, volume: commands.Range[int, VOLUME_M
 		player.volume = target_vol
 	await save_guild_setting(ctx.guild.id, "volume", target_vol)
 	await volume_set_embed(ctx, volume)
+
+@bot.hybrid_command(name="speed", description=f"再生速度を変更します({SPEED_MIN}~{SPEED_MAX}倍)。退出・再生終了で1倍に戻ります。")
+@app_commands.describe(rate="再生速度の倍率を入力してください。", keep_pitch="音の高さを維持するか (既定: 維持する)")
+@app_commands.rename(rate="倍率", keep_pitch="ピッチ維持")
+@commands.guild_only()
+async def bot_speed(ctx: commands.Context, rate: commands.Range[float, SPEED_MIN, SPEED_MAX], keep_pitch: bool = True) -> None:
+	vc = ctx.guild.voice_client
+	if not vc or not vc.is_connected():
+		return await not_connect_bot_embed(ctx)
+	await ctx.defer()
+	# VC 接続中のプレイヤーに保持し、退出・切断・再生終了でプレイヤーごと破棄させる (移動では維持される)
+	player = get_player(ctx.guild.id)
+	player.speed = round(rate, 2)
+	player.keep_pitch = keep_pitch
+	await apply_speed(ctx.guild, player)
+	await speed_set_embed(ctx, player.speed, player.keep_pitch)
 
 @bot.hybrid_command(name="loop", description="現在入っているキューをループ再生します。もう一度実行するとループ解除します。")
 @commands.guild_only()

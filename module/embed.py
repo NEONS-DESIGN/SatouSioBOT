@@ -95,6 +95,7 @@ def help_pages() -> list[discord.Embed]:
 	p1.add_field(name="/resume",           value="一時停止中の曲の再生を再開します。", inline=False)
 	p1.add_field(name="/replay",           value="現在再生中の曲を最初から再生し直します。", inline=False)
 	p1.add_field(name="/skip",             value="再生中の曲をスキップします。", inline=False)
+	p1.add_field(name="/speed [0.5-3.0] [ピッチ維持]", value="再生速度を変更します（再生中の曲にも即反映）。ピッチ維持を False にすると音の高さも変わります。退出・再生終了で1倍に戻ります。", inline=False)
 
 	p2 = discord.Embed(title="📖 コマンドヘルプ #2 (キュー・音量)", color=_GREEN)
 	p2.add_field(name="/qlist",              value="現在のキューに入っている曲のリストを表示します。", inline=False)
@@ -145,6 +146,13 @@ async def shuffle_complete_embed(ctx: commands.Context) -> None:
 async def volume_set_embed(ctx: commands.Context, volume: int) -> None:
 	await _send(ctx, f"🔊 再生音量を {volume}% に設定しました。")
 
+def _speed_label(speed: float, keep_pitch: bool) -> str:
+	"""再生速度の表示文字列 (例: "1.5 倍 (ピッチ維持)")"""
+	return f"{speed:g} 倍 ({'ピッチ維持' if keep_pitch else 'ピッチ変更'})"
+
+async def speed_set_embed(ctx: commands.Context, speed: float, keep_pitch: bool) -> None:
+	await _send(ctx, f"⏩ 再生速度を {_speed_label(speed, keep_pitch)} に設定しました。", "ボイスチャンネルから退出するか、再生が終了すると1倍に戻ります。")
+
 async def purge_complete_embed(ctx: commands.Context, count: int) -> None:
 	await _send(ctx, f"✅ {count} 件のメッセージを削除しました。", ephemeral=True)
 
@@ -181,7 +189,7 @@ async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int, e
 async def music_info_embed(ctx: commands.Context, source: discord.AudioSource, queue_count: int, wait_msg: discord.Message | None = None) -> None:
 	"""
 	再生中の楽曲情報をEmbedで送信する。
-	- source は data(track dict) / title / display_url を持つ再生ソース
+	- source は data(track dict) / title / display_url を持つ再生ソース (speed / keep_pitch があれば等速以外のとき表示)
 	- wait_msg が渡された場合はそのメッセージを編集する
 	- 失敗時はフォールバック表示に切り替える
 	"""
@@ -192,6 +200,9 @@ async def music_info_embed(ctx: commands.Context, source: discord.AudioSource, q
 		embed.add_field(name="タイトル", value=_title_link(_truncate(title, _NOW_PLAYING_TITLE_LIMIT), source.display_url), inline=False)
 		embed.add_field(name="再生時間", value=format_duration(data.get("duration")), inline=True)
 		embed.add_field(name="待機数",   value=f"{queue_count} 曲", inline=True)
+		speed = getattr(source, "speed", 1.0)
+		if speed != 1.0:
+			embed.add_field(name="再生速度", value=_speed_label(speed, getattr(source, "keep_pitch", True)), inline=True)
 		_set_requester_footer(embed, ctx)
 		embed.set_image(url=data.get("thumbnail") or _FALLBACK_THUMBNAIL)
 		await _send_or_edit(ctx, embed, wait_msg)
