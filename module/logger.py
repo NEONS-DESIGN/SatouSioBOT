@@ -14,8 +14,9 @@ from module.options import BASE_DIR, app_config
 spinner_active: bool = False
 spinner_line: str = ""
 
-# コンソールの1行を消すために上書きする空白の幅 (utils のスピナーと共用)
-CLEAR_WIDTH = 150
+# カーソルを行頭に戻して現在の行を消す ANSI エスケープシーケンス (utils のスピナーと共用)。
+# 固定幅の空白で上書きすると、コンソールより広い場合に折り返し、ウィンドウを広げたときに後続の表示が右にずれる
+ERASE_LINE = "\r\x1b[2K"
 # ログ出力先ディレクトリとファイル名
 LOG_DIR = BASE_DIR / "log"
 _LOG_FILE_NAME = "bot.log"
@@ -28,7 +29,7 @@ class SpinnerAwareHandler(logging.StreamHandler):
 	"""
 	コンソール出力用のハンドラ。
 	スピナー動作中にログが割り込む場合、以下の順で出力する:
-		1. \r + スペースでスピナー行を消す
+		1. ERASE_LINE でスピナー行を消す
 		2. ログ行を出力する
 		3. スピナー行を再描画する (改行なし)
 	これによりスピナーとログが混在せずに表示される。
@@ -39,8 +40,7 @@ class SpinnerAwareHandler(logging.StreamHandler):
 			stream = self.stream
 			if spinner_active and spinner_line:
 				# スピナー行を消してからログを出力し、スピナーを再描画する
-				clear = " " * CLEAR_WIDTH
-				stream.write(f"\r{clear}\r{msg}\n")
+				stream.write(f"{ERASE_LINE}{msg}\n")
 				stream.write(spinner_line)
 			else:
 				stream.write(f"{msg}\n")
