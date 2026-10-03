@@ -16,15 +16,16 @@ from dotenv import load_dotenv
 from module.embed import (
 	already_in_channel_embed, already_paused_embed, already_playing_embed,
 	clear_queue_embed, empty_queue_embed, exception_embed, guild_only_embed, help_mention_embed,
-	help_pages, invalid_argument_embed, invalid_clear_range_embed, leave_embed, loop_switch_embed,
-	move_success_embed, not_connect_bot_embed, not_playing_embed, pause_embed, permission_error_embed,
-	purge_complete_embed, queue_list_pages, replay_embed, resume_embed, shuffle_complete_embed,
+	help_pages, invalid_argument_embed, invalid_clear_range_embed, invalid_queue_index_embed, leave_embed,
+	loop_switch_embed, move_success_embed, not_connect_bot_embed, not_playing_embed, pause_embed,
+	permission_error_embed, play_now_embed, purge_complete_embed, queue_list_pages, replay_embed, resume_embed,
+	shuffle_complete_embed,
 	skip_music_embed, speed_set_embed, user_not_here_embed, volume_set_embed,
 )
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
 	SPEED_MAX, SPEED_MIN, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player,
-	mark_rtp_idle, monitor_loop_lag, play_music, requeue_track, server_music_data, shutdown_process_pool, spawn,
+	mark_rtp_idle, monitor_loop_lag, play_music, play_now, requeue_track, server_music_data, shutdown_process_pool, spawn,
 	update_alone_timer, warmup_process_pool,
 )
 from module.options import BASE_DIR
@@ -486,6 +487,26 @@ async def bot_replay(ctx: commands.Context) -> None:
 	player.current = None
 	vc.stop()
 	await replay_embed(ctx)
+
+@bot.hybrid_command(name="pnow", description="キューの指定した曲を今すぐ再生します。再生中の曲は次の曲に回ります。")
+@app_commands.describe(index="今すぐ再生する曲の番号 (/qlist で確認できます)")
+@app_commands.rename(index="番号")
+@commands.guild_only()
+async def bot_play_now(ctx: commands.Context, index: int) -> None:
+	await ctx.defer()
+	vc = ctx.guild.voice_client
+	if not vc or not vc.is_connected():
+		return await not_connect_bot_embed(ctx)
+	player = server_music_data.get(ctx.guild.id)
+	if not player or not player.current or not (vc.is_playing() or vc.is_paused()):
+		return await not_playing_embed(ctx)
+	if not player.queue:
+		return await empty_queue_embed(ctx)
+	if not 1 <= index <= len(player.queue):
+		return await invalid_queue_index_embed(ctx, len(player.queue))
+	bumped = player.current
+	track = play_now(player, vc, index - 1)
+	await play_now_embed(ctx, track, bumped)
 
 # ==========================================
 # 起動

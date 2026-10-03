@@ -256,6 +256,20 @@ def requeue_track(track: dict) -> dict:
 		return {**track, "fetch_task": None, "wait_msg": None, "t_request": None}
 	return {**track, "stream_url": None, "http_headers": {}, "fetch_task": None, "wait_msg": None, "t_request": None}
 
+def play_now(player: "GuildMusicPlayer", vc: discord.VoiceClient, index: int) -> dict:
+	"""
+	キューの index 番目 (0 始まり) の曲を今すぐ再生させ、その track を返す。再生中・一時停止中に呼ぶこと。
+	- 再生中の曲は最初から再生し直すコピーにして、選んだ曲の次に置く
+	- 停止すると再生終了コールバック経由で選んだ曲へ進む (current を外しておくため、ループ中でも二重に追加されない)
+	"""
+	track = player.queue[index]
+	del player.queue[index]
+	player.queue.appendleft(requeue_track(player.current))
+	player.queue.appendleft(track)
+	player.current = None
+	vc.stop()
+	return track
+
 def _drop_expiring_stream(track: dict) -> None:
 	"""先読み済みの stream_url が再生中に期限切れになりそうなら破棄して解決し直させる (期限が読めない URL はそのまま使う)"""
 	expires_in = _stream_expires_in(track)

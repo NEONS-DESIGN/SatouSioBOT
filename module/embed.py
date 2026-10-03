@@ -96,6 +96,7 @@ def help_pages() -> list[discord.Embed]:
 
 	p2 = discord.Embed(title="📖 コマンドヘルプ #2 (キュー・音量)", color=_GREEN)
 	p2.add_field(name="/qlist",              value="現在のキューに入っている曲のリストを表示します。", inline=False)
+	p2.add_field(name="/pnow [番号]",         value="キューの指定した曲を今すぐ再生します。再生中の曲は次の曲として最初から再生し直します。", inline=False)
 	p2.add_field(name="/clear [開始] [終了]", value="キューの曲を削除します。引数なしで全件削除、範囲指定も可能です。", inline=False)
 	p2.add_field(name="/loop",               value="キューのループ再生を切り替えます。", inline=False)
 	p2.add_field(name="/sh",                 value="キューの中身をシャッフルします。", inline=False)
@@ -170,6 +171,14 @@ async def resume_embed(ctx: commands.Context) -> None:
 
 async def clear_queue_embed(ctx: commands.Context, count: int) -> None:
 	await _send(ctx, "🗑️ キュー削除", f"**{count}** 曲をキューから削除しました。")
+
+async def play_now_embed(ctx: commands.Context, track: dict, bumped: dict) -> None:
+	"""キューの曲を今すぐ再生した通知。bumped は押しのけられて次の曲に回った曲"""
+	description = (
+		f"{_title_link(_truncate(track.get('title', 'Unknown Title'), _NOW_PLAYING_TITLE_LIMIT), track.get('url'))} を再生します。\n"
+		f"再生中だった {_title_link(_truncate(bumped.get('title', 'Unknown Title'), _NOW_PLAYING_TITLE_LIMIT), bumped.get('url'))} は次に最初から再生します。"
+	)
+	await _send(ctx, "⏯️ 今すぐ再生", description)
 
 
 # ==========================================
@@ -260,6 +269,9 @@ async def already_playing_embed(ctx: commands.Context) -> None:
 
 async def invalid_clear_range_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "⚠️ 範囲エラー", "正しい数値を指定してください。\n例: `/clear 5` または `/clear 4 8`", _YELLOW)
+
+async def invalid_queue_index_embed(ctx: commands.Context, queue_count: int) -> None:
+	await _send(ctx, "⚠️ 範囲エラー", f"1〜{queue_count} の番号を指定してください。\n番号は `/qlist` で確認できます。", _YELLOW)
 
 
 # ==========================================
