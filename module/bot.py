@@ -88,6 +88,7 @@ class SimplePaginator(discord.ui.View):
 	"""
 	複数のEmbedをページ送りで表示するUI。
 	- PAGINATOR_JUMP_MIN_PAGES 未満の場合は「最初へ」「最後へ」ボタンを非表示にする
+	- 先頭ページでは「最初へ」「前へ」、最終ページでは「次へ」「最後へ」を無効にする
 	- タイムアウト後はすべてのボタンを無効化する (message を外から設定しておくこと)
 	"""
 	def __init__(self, embeds: list[discord.Embed]) -> None:
@@ -95,23 +96,22 @@ class SimplePaginator(discord.ui.View):
 		self.embeds = embeds
 		self.current_page = 0
 		self.message: discord.Message | None = None
-		self._has_jump_buttons = len(embeds) >= PAGINATOR_JUMP_MIN_PAGES
-		if self._has_jump_buttons:
-			self._sync_buttons()
-		else:
+		if len(embeds) < PAGINATOR_JUMP_MIN_PAGES:
 			self.remove_item(self.first_button)
 			self.remove_item(self.last_button)
+		self._sync_buttons()
 
 	def _sync_buttons(self) -> None:
-		"""現在ページに応じて両端ボタンの有効/無効を更新する"""
-		self.first_button.disabled = self.current_page == 0
-		self.last_button.disabled = self.current_page == len(self.embeds) - 1
+		"""現在ページに応じてボタンの有効/無効を更新する (先頭ページでは戻る側、最終ページでは進む側を無効にする)"""
+		at_first = self.current_page == 0
+		at_last = self.current_page == len(self.embeds) - 1
+		self.first_button.disabled = self.previous_button.disabled = at_first
+		self.last_button.disabled = self.next_button.disabled = at_last
 
 	async def _show(self, interaction: discord.Interaction, page: int) -> None:
 		"""指定ページ (範囲外は丸める) を表示する"""
 		self.current_page = min(max(page, 0), len(self.embeds) - 1)
-		if self._has_jump_buttons:
-			self._sync_buttons()
+		self._sync_buttons()
 		await interaction.response.edit_message(embed=self.embeds[self.current_page], view=self)
 
 	async def on_timeout(self) -> None:
