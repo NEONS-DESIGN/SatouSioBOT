@@ -22,6 +22,7 @@ from module.embed import (
 	shuffle_complete_embed,
 	skip_music_embed, speed_set_embed, user_not_here_embed, volume_set_embed,
 )
+from module.errors import report_error
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
 	SPEED_MAX, SPEED_MIN, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player,
@@ -251,7 +252,7 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError) 
 		await invalid_argument_embed(ctx, _describe_input_error(error))
 	elif isinstance(error, (commands.CommandInvokeError, app_commands.CommandInvokeError)):
 		name = ctx.command.qualified_name if ctx.command else "unknown"
-		logger.error(f"{name} コマンド実行エラー", exc_info=error.original)
+		report_error(f"{name} コマンド実行エラー", error.original)
 		await exception_embed(ctx, name, error.original)
 	else:
 		logger.error(f"コマンドエラー: {error!r}")

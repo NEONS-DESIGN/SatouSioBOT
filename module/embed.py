@@ -4,6 +4,7 @@ import discord
 from discord.ext import commands
 
 from module.color import Embed as EmbedColor
+from module.errors import ErrorCause, describe_error
 from module.logger import get_bot_logger
 from module.utils import format_duration
 
@@ -26,6 +27,10 @@ _FALLBACK_TITLE_LIMIT = 50
 # キューリストの1ページあたりの曲数とタイトル最大文字数
 _TRACKS_PER_PAGE = 10
 _QUEUE_TITLE_LIMIT = 45
+# 想定外のエラーで表示する元のエラー文の最大文字数
+_RAW_ERROR_LIMIT = 1500
+# Bot 側の問題によるエラーで、利用者向けの説明に添える一文
+_SERVER_ERROR_NOTE = "Bot 側の問題のため、時間をおいても直らない場合は Bot の管理者にお知らせください。"
 
 
 # ==========================================
@@ -246,17 +251,50 @@ async def not_playing_embed(ctx: commands.Context) -> None:
 async def empty_queue_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "📝 キューが空です。曲を追加してください。", color=_RED)
 
-async def playback_error_embed(ctx: commands.Context, title: str, edit_msg: discord.Message | None = None) -> None:
-	await _send(ctx, "⚠️ 再生エラー", f"再生中にエラーが発生しました: {title}\n次の曲へスキップします。", _RED, edit_msg=edit_msg)
+async def _send_error(
+	ctx: commands.Context,
+	title: str,
+	error: BaseException,
+	*,
+	lead: str | None = None,
+	unknown_lead: str | None = None,
+	edit_msg: discord.Message | None = None,
+) -> discord.Message:
+	"""
+	エラーの原因に応じた通知を送る (edit_msg 指定時は編集)。lead は先頭に常に出す一文。
+	- 利用者側 (URL・動画の問題): 黄色で、原因と確認してほしいことを表示する
+	- Bot 側 (環境・認証・ライブラリ・通信の問題): 赤で、説明と管理者向けの対処を表示する
+	- 想定外: 赤で、unknown_lead に続けて元のエラー文をそのまま表示する
+	"""
+	info = describe_error(error)
+	lines = [lead] if lead else []
+	if info.cause is ErrorCause.UNKNOWN:
+		if unknown_lead:
+			lines.append(unknown_lead)
+		lines.append(f"```py\n{_truncate(info.message, _RAW_ERROR_LIMIT)}\n```")
+		color = _RED
+	elif info.cause is ErrorCause.USER:
+		lines.append(info.message)
+		color = _YELLOW
+	else:
+		lines += [info.message, _SERVER_ERROR_NOTE]
+		color = _RED
+	embed = discord.Embed(title=title, description=_truncate("\n".join(lines), _DESCRIPTION_LIMIT), color=color)
+	if info.admin_hint:
+		embed.add_field(name="🔧 管理者向け", value=_truncate(info.admin_hint, _FIELD_VALUE_LIMIT), inline=False)
+	return await _send_or_edit(ctx, embed, edit_msg)
 
-async def load_error_embed(ctx: commands.Context, error: Exception, edit_msg: discord.Message | None = None) -> None:
-	await _send(ctx, "⚠️ 読み込みエラー", f"読み込みに失敗しました:\n```py\n{error}\n```", _RED, edit_msg=edit_msg)
+async def playback_error_embed(ctx: commands.Context, title: str, error: BaseException, edit_msg: discord.Message | None = None) -> None:
+	await _send_error(ctx, "⚠️ 再生エラー", error, lead=f"再生中にエラーが発生しました: {title}\n次の曲へスキップします。", edit_msg=edit_msg)
 
-async def skip_error_embed(ctx: commands.Context, title: str, edit_msg: discord.Message | None = None) -> None:
-	await _send(ctx, "⚠️ スキップ", f"`{title}` の読み込みに失敗したためスキップします。", _RED, edit_msg=edit_msg)
+async def load_error_embed(ctx: commands.Context, error: BaseException, edit_msg: discord.Message | None = None) -> None:
+	await _send_error(ctx, "⚠️ 読み込みエラー", error, unknown_lead="読み込みに失敗しました:", edit_msg=edit_msg)
 
-async def exception_embed(ctx: commands.Context, command_name: str, error: Exception) -> None:
-	await _send(ctx, f"❌ エラーが発生しました ({command_name})", f"管理者にお問い合わせください。\n```py\n{error}\n```", _RED)
+async def skip_error_embed(ctx: commands.Context, title: str, error: BaseException, edit_msg: discord.Message | None = None) -> None:
+	await _send_error(ctx, "⚠️ スキップ", error, lead=f"`{title}` の読み込みに失敗したためスキップします。", edit_msg=edit_msg)
+
+async def exception_embed(ctx: commands.Context, command_name: str, error: BaseException) -> None:
+	await _send_error(ctx, f"❌ エラーが発生しました ({command_name})", error, unknown_lead="管理者にお問い合わせください。")
 
 async def music_info_fallback_embed(ctx: commands.Context, title: str) -> None:
 	await _send(ctx, "🎵 再生中", f"{_truncate(title, _FALLBACK_TITLE_LIMIT)}\n(詳細情報の表示に失敗しました)", _RED)

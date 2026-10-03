@@ -15,6 +15,7 @@ from module.embed import (
 	music_info_embed, preparing_audio_embed, playlist_added_embed, queue_added_embed,
 	play_completed_embed, load_error_embed, skip_error_embed, playback_error_embed, alone_leave_embed,
 )
+from module.errors import AudioOpenError, UserFacingError, report_error
 from module.logger import get_bot_logger, perf
 from module.options import FFMPEG_OPTIONS, app_config
 from module.priority import Priority, set_priority
@@ -570,7 +571,7 @@ def _open_source(track: dict, volume: float, speed: float, keep_pitch: bool, sta
 	source = YTDLSource(track, volume, speed=speed, keep_pitch=keep_pitch, start=start)
 	try:
 		if not source.prime():
-			raise RuntimeError(f"音声を読み込めませんでした ({source._current_error or 'FFmpeg の出力なし'})")
+			raise AudioOpenError(f"音声を読み込めませんでした ({source._current_error or 'FFmpeg の出力なし'})")
 	except Exception:
 		source.cleanup()
 		raise
@@ -823,9 +824,9 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 					if (current_task := asyncio.current_task()) is not None and current_task.cancelling():
 						raise
 					return
-				except Exception:
+				except Exception as e:
 					player.current = None
-					await _notify(skip_error_embed(ctx, track["title"], edit_msg=wait_msg))
+					await _notify(skip_error_embed(ctx, track["title"], e, edit_msg=wait_msg))
 					continue
 				perf("stream_url待ち", t_wait)
 			volume = (await get_guild_settings(guild.id)).volume
@@ -844,8 +845,8 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 					track.update(stream_url=None, http_headers={}, fetch_task=None, wait_msg=wait_msg)
 					player.queue.appendleft(track)
 					continue
-				logger.error(f"再生ソース生成エラー (ギルド {guild.id}): {e}")
-				await _notify(playback_error_embed(ctx, track["title"], edit_msg=wait_msg))
+				report_error(f"再生ソース生成エラー (ギルド {guild.id})", e)
+				await _notify(playback_error_embed(ctx, track["title"], e, edit_msg=wait_msg))
 				continue
 		if _is_stale(guild, player, vc):
 			await asyncio.to_thread(source.cleanup)
@@ -857,10 +858,10 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 		try:
 			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop()))
 		except Exception as e:
-			logger.error(f"再生開始エラー (ギルド {guild.id}): {e}")
+			report_error(f"再生開始エラー (ギルド {guild.id})", e)
 			await asyncio.to_thread(source.cleanup)
 			player.current = None
-			await _notify(playback_error_embed(ctx, track["title"], edit_msg=wait_msg))
+			await _notify(playback_error_embed(ctx, track["title"], e, edit_msg=wait_msg))
 			continue
 		_start_preload_watch(guild, player)
 		if track["t_request"] is not None:
@@ -1042,11 +1043,11 @@ async def _play_music(
 		settings = await settings_task
 		available = settings.queue_limit - len(player.queue)
 		if available <= 0:
-			raise ValueError(f"キューの上限({settings.queue_limit}曲)に達しているため追加できません。")
+			raise UserFacingError(f"キューの上限({settings.queue_limit}曲)に達しているため追加できません。")
 		limit = min(settings.playlist_limit, available) if is_playlist_result else available
 		tracks = [track for entry in entries[:limit] if (track := _new_track(entry, ctx.author.id))]
 		if not tracks:
-			raise ValueError("再生可能な動画が見つかりませんでした。")
+			raise UserFacingError("再生可能な動画が見つかりませんでした。検索語や URL を変えてお試しください。")
 		# 単曲URLは解決済みのストリーム情報をそのまま使う
 		if is_single_url and not is_playlist_result and info.get("url"):
 			tracks[0]["stream_url"] = info["url"]
@@ -1058,7 +1059,7 @@ async def _play_music(
 		if voice_task is not None:
 			await voice_task
 	except Exception as e:
-		logger.error(f"play_music 解析エラー: {e}")
+		report_error("play_music 解析エラー", e)
 		if early_fetch is not None:
 			early_fetch.cancel()
 		await _await_quietly(defer_task)
@@ -1072,7 +1073,7 @@ async def _play_music(
 	if server_music_data.get(guild_id) is not player:
 		if early_fetch is not None:
 			early_fetch.cancel()
-		await _notify(load_error_embed(ctx, ValueError("曲の準備中に退出したため、追加できませんでした。"), edit_msg=wait_msg))
+		await _notify(load_error_embed(ctx, UserFacingError("曲の準備中に退出したため、追加できませんでした。"), edit_msg=wait_msg))
 		return
 	# 解析待ちの間に別のリクエストで再生が始まっていれば、キュー追加として扱う
 	start_playback = is_idle and _is_idle(player, ctx.guild.voice_client)
