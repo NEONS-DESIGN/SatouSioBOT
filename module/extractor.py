@@ -112,12 +112,23 @@ def _slim(info: dict) -> dict:
 		result["entries"] = [_slim(entry) for entry in info["entries"] if entry]
 	return result
 
+class ExtractionError(Exception):
+	"""抽出失敗。yt-dlp の例外は HTTP 応答やトレースバックを抱えて親プロセスへ送れないため、メッセージだけを持たせて送る"""
+
 def extract(query: str, is_fast: bool) -> dict:
 	"""
 	query の情報を取得して縮小した辞書を返す。
 	- is_fast=True : メタデータのみ (FAST_META_OPTIONS)
 	- is_fast=False: ストリームURL込み。失敗時は予備設定で再試行し、FALLBACK_FLAG を付与する
+	- 失敗時は ExtractionError を送出する
 	"""
+	try:
+		return _extract(query, is_fast)
+	except Exception as e:
+		raise ExtractionError(str(e)) from None
+
+def _extract(query: str, is_fast: bool) -> dict:
+	"""extract の本体。yt-dlp の例外をそのまま送出する"""
 	if is_fast:
 		info = _get_ydl("meta").extract_info(query, download=False)
 		used_fallback = False
