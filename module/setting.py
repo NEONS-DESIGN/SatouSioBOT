@@ -13,13 +13,17 @@ async def check_admin_permission(ctx: commands.Context) -> bool:
 	"""
 	実行者がDiscordのサーバー管理者であるか、
 	またはBotの管理者としてデータベースに登録されているかを判定する。
+	DB の読み込みに失敗した場合は権限なしとして扱う (エラーは sql_execution がログに記録する)。
 	"""
 	if ctx.author.guild_permissions.administrator:
 		return True
-	rows = await sql_execution(
-		"SELECT 1 FROM bot_admins WHERE guild_id=? AND user_id=? LIMIT 1;",
-		(ctx.guild.id, ctx.author.id),
-	)
+	try:
+		rows = await sql_execution(
+			"SELECT 1 FROM bot_admins WHERE guild_id=? AND user_id=? LIMIT 1;",
+			(ctx.guild.id, ctx.author.id),
+		)
+	except Exception:
+		return False
 	return bool(rows)
 
 def bot_admin_only():

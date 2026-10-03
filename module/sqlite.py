@@ -102,12 +102,12 @@ async def close_db() -> None:
 			_connection = None
 			logger.debug("[SQLite] 接続を閉じました。")
 
-async def sql_execution(query: str, params: tuple = ()) -> list | None:
+async def sql_execution(query: str, params: tuple = ()) -> list:
 	"""
 	SQLクエリを実行し、結果行のリストを返す。
 	- Lockで排他制御して並行書き込みの競合を防ぐ
 	- SELECT 以外のときのみ commit する
-	- 失敗時はNoneを返してロガーにエラーを記録する
+	- 失敗時はロガーにエラーを記録してから例外を送出する
 	"""
 	try:
 		db = await _get_connection()
@@ -119,26 +119,40 @@ async def sql_execution(query: str, params: tuple = ()) -> list | None:
 			return result
 	except Exception as e:
 		logger.error(f"[SQLite] クエリ実行エラー: {e} | SQL: {query} | params: {params}")
-		return None
+		raise
+
+# ギルド設定のメモリキャッシュ (曲の切り替えのたびに DB を読まないため)。書き込みはこのプロセスの save_guild_setting だけが行う
+_settings_cache: dict[int, GuildSettings] = {}
+# ギルドごとの設定の更新回数。読み込み中に更新された古い値をキャッシュしないために使う
+_settings_versions: dict[int, int] = {}
 
 async def get_guild_settings(guild_id: int) -> GuildSettings:
-	"""ギルド設定を返す。未登録・取得失敗時はデフォルト値を返す (NULL のカラムも個別に補う)"""
+	"""ギルド設定を返す。未登録はデフォルト値、NULL のカラムは個別に補う。取得失敗時はデフォルト値を返す (キャッシュしない)"""
+	if (cached := _settings_cache.get(guild_id)) is not None:
+		return cached
 	defaults = _default_settings()
-	rows = await sql_execution(
-		"SELECT volume, queue_limit, playlist_limit, alone_timeout FROM server_data WHERE guild_id=?;",
-		(guild_id,),
-	)
-	if not rows:
+	version = _settings_versions.get(guild_id, 0)
+	try:
+		rows = await sql_execution(
+			"SELECT volume, queue_limit, playlist_limit, alone_timeout FROM server_data WHERE guild_id=?;",
+			(guild_id,),
+		)
+	except Exception:
 		return defaults
-	return GuildSettings(*(value if value is not None else default for value, default in zip(rows[0], defaults)))
+	settings = GuildSettings(*(value if value is not None else default for value, default in zip(rows[0], defaults))) if rows else defaults
+	if _settings_versions.get(guild_id, 0) == version:
+		_settings_cache[guild_id] = settings
+	return settings
 
-async def save_guild_setting(guild_id: int, column: str, value: Any) -> bool:
-	"""ギルド設定の1項目を UPSERT する。成功時 True"""
+async def save_guild_setting(guild_id: int, column: str, value: Any) -> None:
+	"""ギルド設定の1項目を UPSERT し、キャッシュにも反映する。失敗時は例外を送出する"""
 	if column not in _SETTING_COLUMNS:
 		raise ValueError(f"更新できない設定項目です: {column}")
-	result = await sql_execution(
+	await sql_execution(
 		f"INSERT INTO server_data (guild_id, {column}) VALUES (?, ?) "
 		f"ON CONFLICT(guild_id) DO UPDATE SET {column}=excluded.{column};",
 		(guild_id, value),
 	)
-	return result is not None
+	_settings_versions[guild_id] = _settings_versions.get(guild_id, 0) + 1
+	if (cached := _settings_cache.get(guild_id)) is not None:
+		_settings_cache[guild_id] = cached._replace(**{column: value})

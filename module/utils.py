@@ -9,8 +9,6 @@ import module.logger as _logger_module
 
 T = TypeVar("T")
 
-# コンソールクリア用パディング幅
-_CLEAR_WIDTH = 150
 # スピナーの描画間隔(秒)
 _SPINNER_INTERVAL = 0.2
 _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -26,7 +24,7 @@ def _spinner_finished(line: str) -> None:
 	if _active_spinners == 0:
 		_logger_module.spinner_active = False
 		_logger_module.spinner_line = ""
-	sys.stdout.write(f"\r{' ' * _CLEAR_WIDTH}\r{line}{Color.RESET}\n")
+	sys.stdout.write(f"\r{' ' * _logger_module.CLEAR_WIDTH}\r{line}{Color.RESET}\n")
 	sys.stdout.flush()
 
 async def loading_spinner(awaitable: Awaitable[T], message: str = "処理中") -> T:

@@ -2,7 +2,6 @@ discord.py[voice,speed]
 yt-dlp[default,curl-cffi]
 yt-dlp-ejs
 aiosqlite
-aiocache
 python-dotenv
 
 # 高速イベントループ (無くても動く)

@@ -14,8 +14,8 @@ from module.options import BASE_DIR, app_config
 spinner_active: bool = False
 spinner_line: str = ""
 
-# コンソールをクリアするためのパディング幅
-_CLEAR_WIDTH = 150
+# コンソールの1行を消すために上書きする空白の幅 (utils のスピナーと共用)
+CLEAR_WIDTH = 150
 # ログ出力先ディレクトリとファイル名
 LOG_DIR = BASE_DIR / "log"
 _LOG_FILE_NAME = "bot.log"
@@ -39,7 +39,7 @@ class SpinnerAwareHandler(logging.StreamHandler):
 			stream = self.stream
 			if spinner_active and spinner_line:
 				# スピナー行を消してからログを出力し、スピナーを再描画する
-				clear = " " * _CLEAR_WIDTH
+				clear = " " * CLEAR_WIDTH
 				stream.write(f"\r{clear}\r{msg}\n")
 				stream.write(spinner_line)
 			else:

@@ -21,10 +21,11 @@ from module.embed import (
 )
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
-	SPEED_MAX, SPEED_MIN, apply_speed, discard_player, get_player, play_music, requeue_track,
+	SPEED_MAX, SPEED_MIN, apply_audio_settings, discard_player, get_player, play_music, requeue_track,
 	server_music_data, shutdown_process_pool, spawn, update_alone_timer, warmup_process_pool,
 )
 from module.options import BASE_DIR
+from module.priority import Priority, set_priority
 from module.setting import NotBotAdmin, setup_setting_commands
 from module.sqlite import close_db, init_db, save_guild_setting
 
@@ -44,9 +45,15 @@ VOLUME_MIN, VOLUME_MAX = 1, 200
 # ==========================================
 class SatouSioBot(commands.Bot):
 	def __init__(self) -> None:
-		intents = discord.Intents.default()
+		# 使うイベントだけを受け取り、入力中通知・リアクション等の不要なイベント処理とキャッシュを省く
+		intents = discord.Intents.none()
+		intents.guilds = True
+		intents.voice_states = True
+		intents.guild_messages = True
+		intents.dm_messages = True
 		intents.message_content = True
-		super().__init__(command_prefix="/", intents=intents, help_command=None)
+		# 過去メッセージのキャッシュは使わないため無効にする (既定は 1000 件保持)
+		super().__init__(command_prefix="/", intents=intents, help_command=None, max_messages=None)
 		# メンション時のヘルプ案内に使う /help のコマンドメンション (同期後に </help:ID> へ更新)
 		self.help_mention = "`/help`"
 
@@ -256,14 +263,10 @@ async def bot_play(ctx: commands.Context, *, query: str) -> None:
 @commands.guild_only()
 async def bot_volume(ctx: commands.Context, volume: commands.Range[int, VOLUME_MIN, VOLUME_MAX]) -> None:
 	await ctx.defer()
-	target_vol = volume / 100
-	vc = ctx.guild.voice_client
-	if vc and isinstance(vc.source, discord.PCMVolumeTransformer):
-		vc.source.volume = target_vol
-	# プレイヤーが存在する場合のみ音量キャッシュを更新する (無ければ次回再生時にDBから読む)
+	await save_guild_setting(ctx.guild.id, "volume", volume / 100)
+	# 再生中なら現在の曲にも反映する (再生していなければ次の曲から反映される)
 	if player := server_music_data.get(ctx.guild.id):
-		player.volume = target_vol
-	await save_guild_setting(ctx.guild.id, "volume", target_vol)
+		await apply_audio_settings(ctx.guild, player)
 	await volume_set_embed(ctx, volume)
 
 @bot.hybrid_command(name="speed", description=f"再生速度を変更します({SPEED_MIN}~{SPEED_MAX}倍)。退出・再生終了で1倍に戻ります。")
@@ -279,7 +282,7 @@ async def bot_speed(ctx: commands.Context, rate: commands.Range[float, SPEED_MIN
 	player = get_player(ctx.guild.id)
 	player.speed = round(rate, 2)
 	player.keep_pitch = keep_pitch
-	await apply_speed(ctx.guild, player)
+	await apply_audio_settings(ctx.guild, player)
 	await speed_set_embed(ctx, player.speed, player.keep_pitch)
 
 @bot.hybrid_command(name="loop", description="現在入っているキューをループ再生します。もう一度実行するとループ解除します。")
@@ -297,10 +300,7 @@ async def bot_shuffle(ctx: commands.Context) -> None:
 	player = server_music_data.get(ctx.guild.id)
 	if not player or not player.queue:
 		return await empty_queue_embed(ctx)
-	tracks = list(player.queue)
-	random.shuffle(tracks)
-	player.queue.clear()
-	player.queue.extend(tracks)
+	random.shuffle(player.queue)
 	player.prefetch()
 	await shuffle_complete_embed(ctx)
 
@@ -434,10 +434,9 @@ async def bot_replay(ctx: commands.Context) -> None:
 	player = server_music_data.get(ctx.guild.id)
 	if not player or not player.current or not (vc.is_playing() or vc.is_paused()):
 		return await not_playing_embed(ctx)
-	# 現在の曲をストリームURLを再解決する形でキュー先頭に積み直し、停止して次曲処理に再生させる
+	# 現在の曲をキュー先頭に積み直し、停止して次曲処理に再生させる (ストリームURLは期限内なら使い回す)
 	player.queue.appendleft(requeue_track(player.current))
 	player.current = None
-	player.prefetch()
 	vc.stop()
 	await replay_embed(ctx)
 
@@ -471,6 +470,8 @@ def main() -> None:
 	if not token:
 		logger.error(".env に discord_api (Botトークン) が設定されていません。")
 		sys.exit(1)
+	# 音声の送信は本体のプロセスで行うため、再生中の処理として優先度を上げる (抽出ワーカーは通常の優先度で起動される)
+	set_priority(Priority.PLAYBACK)
 	try:
 		_run_with_fast_loop(_run_bot(token))
 	except KeyboardInterrupt:

@@ -2,8 +2,6 @@ import configparser
 from pathlib import Path
 from typing import Any
 
-from yt_dlp.networking.impersonate import ImpersonateTarget
-
 # プロジェクトのルートディレクトリ (起動時のカレントディレクトリに依存しないよう、ここを基準にする)
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.ini"
@@ -47,7 +45,7 @@ class Config:
 		self.DEFAULT_QUEUE_LIMIT: int = min(max(self._get("default_queue_limit", 50, int), 1), MAX_LIMIT)
 		self.DEFAULT_PLAYLIST_LIMIT: int = min(max(self._get("default_playlist_limit", 10, int), 1), MAX_LIMIT)
 		self.MAX_RETRIES: int = max(self._get("max_retries", 3, int), 1)
-		self.MAX_WORKER_THREADS: int = max(self._get("max_worker_threads", 4, int), 1)
+		self.MAX_WORKER_THREADS: int = max(self._get("max_worker_threads", 2, int), 1)
 		self.CACHE_TTL: int = max(self._get("cache_ttl", 14400, int), 0)
 		self.DEFAULT_ALONE_TIMEOUT: int = min(max(self._get("default_alone_timeout", 10, int), 0), ALONE_TIMEOUT_MAX)
 		# True のときのみ所要時間の計測や内部処理の詳細をログに出す
@@ -119,14 +117,21 @@ STREAM_OPTIONS: dict[str, Any] = {
 }
 
 # 本抽出が失敗した際の予備設定 (YouTube は既定クライアント + ブラウザ TLS 偽装で取り直す)
+# 偽装先 (impersonate) は yt-dlp の ImpersonateTarget に変換して渡す必要があるため、抽出側の子プロセスで追加する
+# (Bot 本体のプロセスに yt-dlp を読み込ませないため)
 STREAM_FALLBACK_OPTIONS: dict[str, Any] = {
 	**STREAM_OPTIONS,
-	# 文字列ではなく ImpersonateTarget オブジェクトで渡す必要がある
-	"impersonate": ImpersonateTarget.from_str("chrome"),
 	"extractor_args": {"nicovideo": _NICOVIDEO_ARGS},
 }
+STREAM_FALLBACK_IMPERSONATE = "chrome"
+
+# FFmpeg の通信が応答しないまま止まったとみなすまでの秒数 (既定は無制限で、応答が止まると読み込みを待ち続けるため)
+FFMPEG_IO_TIMEOUT_SECONDS = 15
 
 FFMPEG_OPTIONS = {
-	"before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 0 -probesize 32",
-	"options": "-threads 2 -vn -sn",
+	"before_options": (
+		"-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+		f"-rw_timeout {FFMPEG_IO_TIMEOUT_SECONDS * 1_000_000} -analyzeduration 0 -probesize 32"
+	),
+	"options": "-vn -sn",
 }

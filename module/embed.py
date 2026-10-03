@@ -9,7 +9,7 @@ from module.utils import format_duration
 
 logger = get_bot_logger()
 
-# カラー定数 (module/color.py の Embed クラスから参照)
+# カラー定数
 _RED    = EmbedColor.RED
 _GREEN  = EmbedColor.GREEN
 _BLUE   = EmbedColor.BLUE
@@ -20,8 +20,9 @@ _FALLBACK_THUMBNAIL = "https://images.unsplash.com/photo-1511671782779-c97d3d27a
 # Embed の説明文・フィールド値の最大文字数 (Discord の制限)
 _DESCRIPTION_LIMIT = 4096
 _FIELD_VALUE_LIMIT = 1024
-# 再生中表示のタイトル最大文字数
+# 再生中表示のタイトル最大文字数 (通常表示 / 表示失敗時の簡易表示)
 _NOW_PLAYING_TITLE_LIMIT = 100
+_FALLBACK_TITLE_LIMIT = 50
 # キューリストの1ページあたりの曲数とタイトル最大文字数
 _TRACKS_PER_PAGE = 10
 _QUEUE_TITLE_LIMIT = 45
@@ -63,15 +64,11 @@ def _set_requester_footer(embed: discord.Embed, ctx: commands.Context) -> None:
 	"""Embed のフッターにリクエスト者を表示する"""
 	embed.set_footer(text=f"Requested by: {ctx.author.display_name}", icon_url=ctx.author.display_avatar.url)
 
-def _music_embed_base(ctx: commands.Context, info: dict, title: str) -> discord.Embed:
-	"""
-	楽曲・プレイリスト追加通知用Embedのベースを生成する内部関数。
-	- タイトル・URL・サムネイル・フッターを共通でセットする
-	"""
+def _music_embed_base(ctx: commands.Context, info: dict, title: str, label: str) -> discord.Embed:
+	"""楽曲・プレイリスト追加通知用Embedのベース (label 欄にタイトルとURL、サムネイル、フッター) を生成する"""
 	url = info.get("webpage_url") or info.get("url")
 	embed = discord.Embed(title=title, color=_BLUE)
-	label = "プレイリスト名" if "プレイリスト" in title else "タイトル"
-	embed.add_field(name=label, value=_title_link(info.get("title", "Unknown Title"), url), inline=False)
+	embed.add_field(name=label, value=_title_link(info.get("title") or "Unknown Title", url), inline=False)
 	_set_requester_footer(embed, ctx)
 	if thumbnail := info.get("thumbnail"):
 		embed.set_image(url=thumbnail)
@@ -180,35 +177,33 @@ async def clear_queue_embed(ctx: commands.Context, count: int) -> None:
 # ==========================================
 async def playlist_added_embed(ctx: commands.Context, info: dict, count: int, edit_msg: discord.Message | None = None) -> None:
 	"""プレイリストをキューに追加した際の通知Embed"""
-	embed = _music_embed_base(ctx, info, "📝 プレイリストをキューに追加")
+	embed = _music_embed_base(ctx, info, "📝 プレイリストをキューに追加", "プレイリスト名")
 	embed.add_field(name="追加曲数", value=f"{count} 曲", inline=True)
 	await _send_or_edit(ctx, embed, edit_msg)
 
 async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int, edit_msg: discord.Message | None = None) -> None:
 	"""単曲をキューに追加した際の通知Embed"""
-	embed = _music_embed_base(ctx, info, "✅ キューに追加")
-	duration = format_duration(info.get("duration"))
-	embed.add_field(name="再生時間", value=duration, inline=True)
+	embed = _music_embed_base(ctx, info, "✅ キューに追加", "タイトル")
+	embed.add_field(name="再生時間", value=format_duration(info.get("duration")), inline=True)
 	embed.add_field(name="待機数",   value=f"{queue_pos} 曲", inline=True)
 	await _send_or_edit(ctx, embed, edit_msg)
 
 async def music_info_embed(ctx: commands.Context, source: discord.AudioSource, queue_count: int, wait_msg: discord.Message | None = None) -> None:
 	"""
 	再生中の楽曲情報をEmbedで送信する。
-	- source は data(track dict) / title / display_url を持つ再生ソース (speed / keep_pitch があれば等速以外のとき表示)
+	- source は data(track dict) / title / display_url / speed / keep_pitch を持つ再生ソース (速度は等速以外のとき表示)
 	- wait_msg が渡された場合はそのメッセージを編集する
 	- 失敗時はフォールバック表示に切り替える
 	"""
-	title = str(getattr(source, "title", "Unknown Title"))
+	title: str = source.title
 	try:
 		data: dict = source.data
 		embed = discord.Embed(title="🎵 再生中", color=_GREEN)
 		embed.add_field(name="タイトル", value=_title_link(_truncate(title, _NOW_PLAYING_TITLE_LIMIT), source.display_url), inline=False)
 		embed.add_field(name="再生時間", value=format_duration(data.get("duration")), inline=True)
 		embed.add_field(name="待機数",   value=f"{queue_count} 曲", inline=True)
-		speed = getattr(source, "speed", 1.0)
-		if speed != 1.0:
-			embed.add_field(name="再生速度", value=_speed_label(speed, getattr(source, "keep_pitch", True)), inline=True)
+		if source.speed != 1.0:
+			embed.add_field(name="再生速度", value=_speed_label(source.speed, source.keep_pitch), inline=True)
 		_set_requester_footer(embed, ctx)
 		embed.set_image(url=data.get("thumbnail") or _FALLBACK_THUMBNAIL)
 		await _send_or_edit(ctx, embed, wait_msg)
@@ -242,8 +237,8 @@ async def not_playing_embed(ctx: commands.Context) -> None:
 async def empty_queue_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "📝 キューが空です。曲を追加してください。", color=_RED)
 
-async def playback_error_embed(ctx: commands.Context, title: str) -> None:
-	await _send(ctx, "⚠️ 再生エラー", f"再生中にエラーが発生しました: {title}\n次の曲へスキップします。", _RED)
+async def playback_error_embed(ctx: commands.Context, title: str, edit_msg: discord.Message | None = None) -> None:
+	await _send(ctx, "⚠️ 再生エラー", f"再生中にエラーが発生しました: {title}\n次の曲へスキップします。", _RED, edit_msg=edit_msg)
 
 async def load_error_embed(ctx: commands.Context, error: Exception, edit_msg: discord.Message | None = None) -> None:
 	await _send(ctx, "⚠️ 読み込みエラー", f"読み込みに失敗しました:\n```py\n{error}\n```", _RED, edit_msg=edit_msg)
@@ -255,7 +250,7 @@ async def exception_embed(ctx: commands.Context, command_name: str, error: Excep
 	await _send(ctx, f"❌ エラーが発生しました ({command_name})", f"管理者にお問い合わせください。\n```py\n{error}\n```", _RED)
 
 async def music_info_fallback_embed(ctx: commands.Context, title: str) -> None:
-	await _send(ctx, "🎵 再生中", f"{title[:50]}...\n(詳細情報の表示に失敗しました)", _RED)
+	await _send(ctx, "🎵 再生中", f"{_truncate(title, _FALLBACK_TITLE_LIMIT)}\n(詳細情報の表示に失敗しました)", _RED)
 
 async def already_paused_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "⚠️ 通知", "既に一時停止中です。", _YELLOW)
