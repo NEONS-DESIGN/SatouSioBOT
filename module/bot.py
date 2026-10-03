@@ -25,7 +25,7 @@ from module.embed import (
 from module.errors import report_error
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
-	SPEED_MAX, SPEED_MIN, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player,
+	SPEED_MAX, SPEED_MIN, MusicVoiceClient, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player,
 	mark_rtp_idle, monitor_loop_lag, play_music, play_now, requeue_track, server_music_data, shutdown_process_pool, spawn,
 	update_alone_timer, warmup_process_pool,
 )
@@ -211,13 +211,14 @@ async def on_message(message: discord.Message) -> None:
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
 	"""
 	VC の状態変化を処理する。
-	- Bot 自身が切断された: リソースをクリーンアップする
+	- Bot 自身が切断された: リソースをクリーンアップする (通信断で再接続を待っている間は除く)
 	- 人の出入り・移動、Bot 自身の移動: 聴者不在による自動退出タイマーを更新する
 	"""
 	guild = member.guild
 	if member.id == bot.user.id:
 		# 切断直後に新しい接続が始まっている場合 (/p による再接続) は、新しいプレイヤーを破棄しない
-		if guild.voice_client is None and before.channel is not None and after.channel is None and guild.id in server_music_data:
+		player = server_music_data.get(guild.id)
+		if guild.voice_client is None and before.channel is not None and after.channel is None and player is not None and player.lost_channel is None:
 			discard_player(guild.id)
 			logger.debug(f"[CLEANUP] ギルド {guild.id} からBotが切断されたため、リソースをクリーンアップしました。")
 			return
@@ -270,7 +271,7 @@ async def _timed(label: str, coro: Coroutine[Any, Any, Any]) -> Any:
 async def _connect_voice(channel: discord.VoiceChannel | discord.StageChannel) -> discord.VoiceProtocol:
 	"""channel に接続する。同時要求で既に接続済みになっていれば既存の接続を返す"""
 	try:
-		return await channel.connect()
+		return await channel.connect(cls=MusicVoiceClient)
 	except discord.ClientException:
 		if channel.guild.voice_client is not None:
 			return channel.guild.voice_client
@@ -377,6 +378,11 @@ async def bot_move(ctx: commands.Context) -> None:
 async def bot_leave(ctx: commands.Context) -> None:
 	vc = ctx.guild.voice_client
 	if not vc:
+		# 通信断で再接続を待っている間なら、再接続を取りやめる
+		player = server_music_data.get(ctx.guild.id)
+		if player is not None and player.lost_channel is not None:
+			discard_player(ctx.guild.id)
+			return await leave_embed(ctx)
 		return await not_connect_bot_embed(ctx)
 	await ctx.defer()
 	# 先にプレイヤーを破棄し、停止で発火する次曲処理が動かないようにする

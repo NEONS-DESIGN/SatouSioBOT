@@ -7,6 +7,7 @@ from collections.abc import Coroutine
 from typing import Any, TypeVar
 from urllib.parse import parse_qs, urlsplit
 
+import aiohttp
 import discord
 from discord.ext import commands
 
@@ -14,6 +15,7 @@ from module import extractor
 from module.embed import (
 	music_info_embed, preparing_audio_embed, playlist_added_embed, queue_added_embed,
 	play_completed_embed, load_error_embed, skip_error_embed, playback_error_embed, alone_leave_embed,
+	voice_reconnecting_embed, voice_reconnected_embed, voice_reconnect_failed_embed,
 )
 from module.errors import AudioOpenError, UserFacingError, report_error
 from module.logger import get_bot_logger, perf
@@ -66,6 +68,16 @@ RTP_TIMESTAMP_MOD = 1 << 32
 # discord.py が送信を止めるとき (曲の終了・一時停止) に一度に送る無音パケットの数と、それで進む RTP タイムスタンプ
 SILENCE_FRAMES = 5
 SILENCE_SAMPLES = SILENCE_FRAMES * discord.opus.Encoder.SAMPLES_PER_FRAME
+# 通信断で VC から切断されたときの再接続: 試行回数、n 回目の前に待つ秒数 (n 倍)、1 回の接続のタイムアウト(秒)
+VOICE_RECONNECT_ATTEMPTS = 3
+VOICE_RECONNECT_DELAY = 3.0
+VOICE_CONNECT_TIMEOUT = 30.0
+# discord.py 自身が再接続を試みている間 (接続オブジェクトは残っているが未接続)、復旧を待つ最大秒数と確認間隔。
+# discord.py の 1 回の試行は「待ち (数秒) + 接続のタイムアウト 30 秒」かかり、失敗すると接続オブジェクトを片付けるため、その 1 回分を覆う長さにする
+VOICE_BUILTIN_RECONNECT_WAIT = 65.0
+VOICE_STATE_POLL_INTERVAL = 0.5
+# 曲の残りがこの秒数 (元音源) 未満で切断された場合は、その曲を再開せずに次の曲へ進む
+RESUME_MIN_REMAINING = 5.0
 
 # ==========================================
 # バックグラウンドタスク管理
@@ -233,6 +245,7 @@ def _new_track(entry: dict, requester_id: int) -> dict | None:
 		"fetch_task": None,
 		"wait_msg": None,
 		"t_request": None,
+		"start": 0.0,
 	}
 
 def _stream_expires_in(track: dict) -> float | None:
@@ -249,13 +262,13 @@ def _stream_lasts(track: dict, expires_in: float) -> bool:
 
 def requeue_track(track: dict) -> dict:
 	"""
-	ループ・リプレイ用に、表示状態をリセットした track のコピーを返す。
+	ループ・リプレイ用に、表示状態をリセットした track のコピーを返す (曲の先頭から再生する)。
 	- stream_url は有効期限が十分に残っていると分かる場合だけ引き継ぎ (再抽出を省く)、それ以外は解決し直させる
 	"""
 	expires_in = _stream_expires_in(track) if track["stream_url"] else None
 	if expires_in is not None and _stream_lasts(track, expires_in):
-		return {**track, "fetch_task": None, "wait_msg": None, "t_request": None}
-	return {**track, "stream_url": None, "http_headers": {}, "fetch_task": None, "wait_msg": None, "t_request": None}
+		return {**track, "fetch_task": None, "wait_msg": None, "t_request": None, "start": 0.0}
+	return {**track, "stream_url": None, "http_headers": {}, "fetch_task": None, "wait_msg": None, "t_request": None, "start": 0.0}
 
 def play_now(player: "GuildMusicPlayer", vc: discord.VoiceClient, index: int) -> dict:
 	"""
@@ -330,11 +343,14 @@ class GuildMusicPlayer:
 	- watch_task: 再生中の曲の残り時間を見て、次の曲を準備するタスク
 	- preload_target / preload_track / preload_task: 準備した次の曲。target は準備の基になった曲 (キュー先頭、またはループ時の現在曲)、
 	  track は実際に再生する track (ループ時は現在曲のコピー)、task は FFmpeg を起動して YTDLSource を返すタスク
+	- source: 再生中の曲のソース (通信断で切断されたときの再開位置に使う)
+	- lost_channel: 通信断で切断された VC (再接続先)。再接続を待つ間だけ設定される
 	"""
 	__slots__ = (
 		"guild_id", "queue", "loop", "current", "speed", "keep_pitch",
 		"text_channel", "alone_task", "prefetch_task", "advance_lock",
 		"pending_requests", "watch_task", "preload_target", "preload_track", "preload_task",
+		"source", "lost_channel",
 	)
 	def __init__(self, guild_id: int) -> None:
 		self.guild_id = guild_id
@@ -352,6 +368,8 @@ class GuildMusicPlayer:
 		self.preload_target: dict | None = None
 		self.preload_track: dict | None = None
 		self.preload_task: asyncio.Task | None = None
+		self.source: "YTDLSource | None" = None
+		self.lost_channel: discord.abc.Connectable | None = None
 
 	def prefetch(self) -> None:
 		"""
@@ -403,6 +421,8 @@ class GuildMusicPlayer:
 		self.discard_preload()
 		self.queue.clear()
 		self.current = None
+		self.source = None
+		self.lost_channel = None
 
 # ギルドIDをキーにしたプレイヤー管理辞書
 server_music_data: dict[int, GuildMusicPlayer] = {}
@@ -419,6 +439,32 @@ def discard_player(guild_id: int) -> None:
 	_rtp_idle_since.pop(guild_id, None)
 	if player := server_music_data.pop(guild_id, None):
 		player.cleanup()
+
+class MusicVoiceClient(discord.VoiceClient):
+	"""
+	切断の理由を GuildMusicPlayer に伝える VoiceClient。VC への接続はすべてこのクラスで行う。
+	- Discord 側から切断された (キック・チャンネル削除): 意図した切断として、プレイヤーを破棄する (再接続しない)
+	- それ以外で切断された (discord.py の再接続が失敗した通信断): 再生する曲が残っていれば切断された VC を記録し、次の曲の処理で再接続させる
+	/leave・自動退出・再生終了などの Bot 自身による切断は、先にプレイヤーを破棄してから切断するため対象外
+	"""
+	async def on_voice_state_update(self, data: dict) -> None:
+		# discord.py は、自分で切断を要求していないのに「チャンネル無し」が届いたら外部からの切断とみなす。同じ判定に「接続が完了している」を加える
+		# (通信断で discord.py が再接続している最中や、失敗した接続の切断通知が遅れて新しい接続に届いた場合を、キックと取り違えないため)
+		# 内部属性が無くなった場合は、キック後に再接続しない側に倒す
+		if (
+			data.get("channel_id") is None
+			and self.is_connected()
+			and not getattr(self._connection, "_expecting_disconnect", False)
+		):
+			logger.info(f"ギルド {self.guild.id} の VC から外部の操作で切断されました。")
+			discard_player(self.guild.id)
+		await super().on_voice_state_update(data)
+
+	def cleanup(self) -> None:
+		player = server_music_data.get(self.guild.id)
+		if player is not None and (player.current is not None or player.queue):
+			player.lost_channel = self.channel
+		super().cleanup()
 
 # ==========================================
 # YTDLSource (FFmpeg AudioSource ラッパー)
@@ -591,10 +637,10 @@ def _open_synced_source(old: YTDLSource, volume: float, speed: float, keep_pitch
 # 再生制御
 # ==========================================
 async def _notify(coro: Coroutine[Any, Any, T]) -> T | None:
-	"""通知メッセージを送信する。送信失敗 (権限不足など) で再生制御を止めないよう、失敗時は None を返す"""
+	"""通知メッセージを送信する。送信失敗 (権限不足・通信断など) で再生制御を止めないよう、失敗時は None を返す"""
 	try:
 		return await coro
-	except discord.HTTPException as e:
+	except (discord.HTTPException, aiohttp.ClientError, OSError) as e:
 		logger.warning(f"通知メッセージの送信に失敗しました: {e}")
 		return None
 
@@ -656,13 +702,153 @@ async def play_next_song(ctx: commands.Context) -> None:
 		player.prefetch()
 
 def _is_stale(guild: discord.Guild, player: GuildMusicPlayer, vc: discord.VoiceClient) -> bool:
-	"""待機中にプレイヤーが破棄された、または VC が切断されたかを返す。切断時はプレイヤーも破棄する"""
-	if server_music_data.get(guild.id) is not player:
-		return True
-	if not vc.is_connected():
-		discard_player(guild.id)
-		return True
+	"""待機中にプレイヤーが破棄された、または VC が切断されたかを返す (切断後の再接続・破棄は次の曲の処理が行う)"""
+	return server_music_data.get(guild.id) is not player or not vc.is_connected()
+
+def _put_back(player: GuildMusicPlayer, track: dict, wait_msg: discord.Message | None) -> None:
+	"""再生を始められなかった track をキュー先頭に戻す (current を外すため、ループ中でも二重に追加されない)"""
+	track["wait_msg"] = wait_msg
+	player.queue.appendleft(track)
+	player.current = None
+
+async def _interrupted(
+	guild: discord.Guild,
+	player: GuildMusicPlayer,
+	vc: discord.VoiceClient,
+	track: dict,
+	wait_msg: discord.Message | None,
+	source: "YTDLSource | None" = None,
+) -> bool:
+	"""
+	再生の準備中にプレイヤーが破棄された・VC が切断されたかを返す。
+	中断する場合は起動済みの source を停止し、track をキュー先頭に戻す (再接続できたらこの曲から再生し直す)
+	"""
+	if not _is_stale(guild, player, vc):
+		return False
+	if source is not None:
+		await asyncio.to_thread(source.cleanup)
+	_put_back(player, track, wait_msg)
+	return True
+
+def _resume_point(player: GuildMusicPlayer) -> None:
+	"""
+	再生中だった曲を、切断された位置から再生するコピーにしてキュー先頭に戻す。再生中の曲が無ければ何もしない。
+	- 残りが RESUME_MIN_REMAINING 未満なら再生し終えたものとして扱う (ループ中は通常どおり末尾へ回す)
+	"""
+	current, source = player.current, player.source
+	player.source = None
+	if current is None:
+		return
+	player.current = None
+	track = requeue_track(current)
+	position = source.position if source is not None and source.data is current else 0.0
+	if current["duration"] and current["duration"] - position < RESUME_MIN_REMAINING:
+		if player.loop:
+			player.queue.append(track)
+		return
+	track["start"] = position
+	player.queue.appendleft(track)
+
+async def _wait_for_builtin_reconnect(guild: discord.Guild, vc: discord.VoiceClient) -> bool:
+	"""discord.py 自身の再接続 (接続オブジェクトは残ったまま未接続) が終わるのを待つ。接続し直せたら True"""
+	deadline = time.monotonic() + VOICE_BUILTIN_RECONNECT_WAIT
+	while time.monotonic() < deadline:
+		if guild.voice_client is not vc:
+			return False
+		if vc.is_connected():
+			return True
+		await asyncio.sleep(VOICE_STATE_POLL_INTERVAL)
 	return False
+
+async def _drop_stale_vc(guild: discord.Guild, stale_vc: discord.VoiceClient | None) -> None:
+	"""切断後も未接続のまま残った接続オブジェクト stale_vc を切り離す (/p などが新しく始めた接続には触れない)"""
+	if stale_vc is not None and guild.voice_client is stale_vc and not stale_vc.is_connected():
+		await stale_vc.disconnect(force=True)
+
+async def _reconnect(guild: discord.Guild, player: GuildMusicPlayer, channel_id: int, stale_vc: discord.VoiceClient | None) -> str | None:
+	"""
+	channel_id の VC へ再接続を試みる (VOICE_RECONNECT_ATTEMPTS 回まで、回を追うごとに間隔を空ける)。
+	接続できた (/p などで接続し直された場合を含む)・プレイヤーが破棄されたら None、諦めたら利用者向けの理由 (「〜ため」) を返す
+	- stale_vc: 切断前の接続オブジェクト。未接続のまま残っていれば、新しく接続する前に切り離す
+	"""
+	for attempt in range(1, VOICE_RECONNECT_ATTEMPTS + 1):
+		await asyncio.sleep(VOICE_RECONNECT_DELAY * attempt)
+		if server_music_data.get(guild.id) is not player:
+			return None
+		vc = guild.voice_client
+		if vc is not None and vc.is_connected():
+			return None
+		channel = guild.get_channel(channel_id)
+		if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+			return "ボイスチャンネルが見つからなくなったため"
+		if not _has_listener(channel):
+			return "ボイスチャンネルに誰もいなくなったため"
+		if vc is not None and vc is not stale_vc:
+			# /p などで別の接続が進行中。次の回で接続できたか確認する
+			continue
+		try:
+			await _drop_stale_vc(guild, stale_vc)
+			await channel.connect(cls=MusicVoiceClient, timeout=VOICE_CONNECT_TIMEOUT)
+			logger.info(f"ギルド {guild.id} の VC に再接続しました ({attempt}/{VOICE_RECONNECT_ATTEMPTS})。")
+			return None
+		except Exception as e:
+			# 同時に /p などで接続された場合 (ClientException) は、次の回の確認で接続済みとして扱う
+			logger.warning(f"ギルド {guild.id} の VC への再接続に失敗しました ({attempt}/{VOICE_RECONNECT_ATTEMPTS}): {e!r}")
+	return "何度か再接続を試みましたが、Discord との音声接続を復旧できなかったため"
+
+async def _recover_voice(guild: discord.Guild, player: GuildMusicPlayer, vc: discord.VoiceClient | None) -> bool:
+	"""
+	VC が切断されていたときに、再生を続けられる状態へ戻す。続けられるなら True (呼び出し側は次の曲の処理をやり直す)。
+	- discord.py 自身の再接続中なら、まずその完了を待つ
+	- 通信断で切断されていれば (MusicVoiceClient が lost_channel を記録)、再接続して再生中だった曲を切断された位置から流し直す。結果は text_channel に通知する
+	- 意図した切断・再接続先が分からない・再接続できなかった場合はプレイヤーを破棄する (想定外の例外でも破棄してから送出する)
+	"""
+	try:
+		return await _recover_voice_inner(guild, player, vc)
+	except BaseException:
+		# 再接続待ちのまま残ると on_voice_state_update が破棄しないため、ここで片付ける
+		if server_music_data.get(guild.id) is player:
+			discard_player(guild.id)
+		raise
+
+async def _recover_voice_inner(guild: discord.Guild, player: GuildMusicPlayer, vc: discord.VoiceClient | None) -> bool:
+	"""_recover_voice の本体"""
+	if vc is not None and await _wait_for_builtin_reconnect(guild, vc):
+		return True
+	channel = player.lost_channel or (vc.channel if vc is not None else None)
+	if channel is None or (player.current is None and not player.queue):
+		discard_player(guild.id)
+		await _drop_stale_vc(guild, vc)
+		return False
+	player.lost_channel = channel
+	_resume_point(player)
+	if not player.queue:
+		# 再生中の曲が終わり際で、続きの曲も無かった
+		discard_player(guild.id)
+		await _drop_stale_vc(guild, vc)
+		return False
+	resumed = player.queue[0] if player.queue[0]["start"] > 0 else None
+	_rtp_idle_since.pop(guild.id, None)
+	logger.warning(f"ギルド {guild.id} の VC との接続が切れたため再接続します: {channel.name}")
+	text_channel = player.text_channel
+	notice = await _notify(voice_reconnecting_embed(text_channel, VOICE_RECONNECT_ATTEMPTS)) if text_channel is not None else None
+	reason = await _reconnect(guild, player, channel.id, vc)
+	if server_music_data.get(guild.id) is not player:
+		# 待つ間に /leave などで停止された (停止の通知はそちらが出す)
+		if notice is not None:
+			await _notify(notice.delete())
+		return False
+	player.lost_channel = None
+	if reason is not None:
+		logger.warning(f"ギルド {guild.id} の VC に再接続できなかったため再生を停止しました: {reason}")
+		discard_player(guild.id)
+		await _drop_stale_vc(guild, vc)
+		if text_channel is not None:
+			await _notify(voice_reconnect_failed_embed(text_channel, reason, edit_msg=notice))
+		return False
+	if text_channel is not None:
+		await _notify(voice_reconnected_embed(text_channel, resumed, edit_msg=notice))
+	return True
 
 def _is_active(vc: discord.VoiceProtocol | None) -> bool:
 	"""VC で再生中または一時停止中か"""
@@ -788,7 +974,9 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 		if server_music_data.get(guild.id) is not player:
 			return
 		if vc is None or not vc.is_connected():
-			discard_player(guild.id)
+			# 通信断で切断されていれば再接続し、再生していた曲を続きから流す
+			if await _recover_voice(guild, player, vc):
+				continue
 			return
 		if _is_active(vc):
 			return
@@ -830,12 +1018,12 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 					continue
 				perf("stream_url待ち", t_wait)
 			volume = (await get_guild_settings(guild.id)).volume
-			if _is_stale(guild, player, vc):
-				return
+			if await _interrupted(guild, player, vc, track, wait_msg):
+				continue
 			try:
 				t_ff = time.perf_counter()
 				# FFmpeg の起動 (CreateProcess) と最初のフレームの受信はブロッキングで、高負荷時は数十秒かかりうるためイベントループ外で行う
-				source = await asyncio.to_thread(_open_source, track, volume, player.speed, player.keep_pitch)
+				source = await asyncio.to_thread(_open_source, track, volume, player.speed, player.keep_pitch, track["start"])
 				perf("FFmpeg起動(初回フレームまで)", t_ff)
 			except Exception as e:
 				player.current = None
@@ -848,13 +1036,11 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 				report_error(f"再生ソース生成エラー (ギルド {guild.id})", e)
 				await _notify(playback_error_embed(ctx, track["title"], e, edit_msg=wait_msg))
 				continue
-		if _is_stale(guild, player, vc):
-			await asyncio.to_thread(source.cleanup)
-			return
+		if await _interrupted(guild, player, vc, track, wait_msg, source):
+			continue
 		await advance_rtp_timestamp(vc)
-		if _is_stale(guild, player, vc):
-			await asyncio.to_thread(source.cleanup)
-			return
+		if await _interrupted(guild, player, vc, track, wait_msg, source):
+			continue
 		try:
 			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop()))
 		except Exception as e:
@@ -863,6 +1049,8 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 			player.current = None
 			await _notify(playback_error_embed(ctx, track["title"], e, edit_msg=wait_msg))
 			continue
+		player.source = source
+		player.lost_channel = None
 		_start_preload_watch(guild, player)
 		if track["t_request"] is not None:
 			perf("★総計 コマンド→再生開始", track["t_request"])
@@ -909,6 +1097,7 @@ async def _swap_source(guild: discord.Guild, player: GuildMusicPlayer) -> None:
 	was_paused = vc.is_paused()
 	# 差し替えは after コールバックを呼ばないため、次の曲へは進まない
 	vc.source = new
+	player.source = new
 	# set_source は内部で再開するため、一時停止中だった場合は止め直す
 	if was_paused:
 		vc.pause()

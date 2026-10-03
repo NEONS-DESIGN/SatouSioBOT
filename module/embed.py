@@ -146,6 +146,42 @@ async def alone_leave_embed(channel: discord.abc.Messageable) -> None:
 	embed = discord.Embed(title="👋 聴者がいなくなったため再生を停止します", description="ボイスチャンネルから退出しました。", color=_YELLOW)
 	await channel.send(embed=embed)
 
+async def _send_to_channel(channel: discord.abc.Messageable, embed: discord.Embed, edit_msg: discord.Message | None = None) -> discord.Message:
+	"""コマンドの応答ではない通知をチャンネルへ送る。edit_msg があれば編集し、失敗 (削除済みなど) なら新規送信する"""
+	if edit_msg:
+		try:
+			return await edit_msg.edit(embed=embed)
+		except discord.HTTPException:
+			pass
+	return await channel.send(embed=embed)
+
+async def voice_reconnecting_embed(channel: discord.abc.Messageable, attempts: int) -> discord.Message:
+	"""Discord との音声接続が切れ、再接続を始めたときの通知 (結果は同じメッセージを編集して知らせる)"""
+	embed = discord.Embed(
+		title="📡 ボイスチャンネルとの接続が切れました",
+		description=f"Discord との通信が一時的に途切れたため、再接続しています… (最大 {attempts} 回)\n再接続できれば、切れた位置から再生を再開します。",
+		color=_YELLOW,
+	)
+	return await _send_to_channel(channel, embed)
+
+async def voice_reconnected_embed(channel: discord.abc.Messageable, track: dict | None, edit_msg: discord.Message | None = None) -> None:
+	"""再接続に成功したときの通知。再開する曲があれば曲名と再開位置を示す"""
+	if track is None:
+		description = "ボイスチャンネルに再接続しました。キューの続きから再生します。"
+	else:
+		description = f"ボイスチャンネルに再接続しました。\n{_title_link(track['title'], track['url'])} を **{format_duration(track['start'])}** から再開します。"
+	embed = discord.Embed(title="✅ 再接続しました", description=_truncate(description, _DESCRIPTION_LIMIT), color=_GREEN)
+	await _send_to_channel(channel, embed, edit_msg)
+
+async def voice_reconnect_failed_embed(channel: discord.abc.Messageable, reason: str, edit_msg: discord.Message | None = None) -> None:
+	"""再接続を諦めて再生を止めたときの通知。reason は「〜ため」で終わる停止の理由"""
+	embed = discord.Embed(
+		title="⚠️ 再生を停止しました",
+		description=f"{reason}、再生を停止しました。キューは空になっています。\n少し時間をおいてから `/p` で再生し直してください。",
+		color=_RED,
+	)
+	await _send_to_channel(channel, embed, edit_msg)
+
 async def loop_switch_embed(ctx: commands.Context, state: str) -> None:
 	await _send(ctx, f"🔁 ループ再生を {state} にしました。")
 
