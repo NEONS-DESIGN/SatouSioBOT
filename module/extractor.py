@@ -6,6 +6,7 @@ Bot 本体のプロセスも関数の参照のためにこのモジュールを 
 import multiprocessing
 import multiprocessing.connection
 import os
+import pathlib
 import threading
 from typing import Any
 
@@ -28,6 +29,14 @@ _SKIP_INITIAL_DATA = "initial_data"
 
 # 親プロセスの終了を検知してワーカーを終了させるときの終了コード
 _ORPHAN_EXIT_CODE = 1
+
+# yt-dlp のキャッシュのうち、署名・n チャレンジの解決 (Deno) に関するものを置く区画と、前処理済みプレイヤーのファイル名の接頭辞
+_SOLVER_CACHE_SECTION = "challenge-solver"
+_PLAYER_CACHE_PREFIX = "player,3A"
+# 前処理済みプレイヤーのキャッシュを残す版数 (1 版あたり約 4MB。YouTube がプレイヤーを更新するたびに増える)
+PLAYER_CACHE_KEEP = 2
+# ワーカー起動時に接続を確立しておくための軽い URL (最初の HTTP リクエストに約 0.9s の固定費があるため)
+WARMUP_URL = "https://www.youtube.com/generate_204"
 
 # 子プロセスごとのモード別オプションと、使い回す YoutubeDL インスタンス (init_worker で設定する)
 _options: dict[str, dict[str, Any]] = {}
@@ -58,6 +67,40 @@ def _pin_premium_status(is_premium: bool) -> bool:
 		return is_premium and self.is_authenticated
 	YoutubeIE._is_premium_subscriber = _is_premium_subscriber
 	return True
+
+def _enable_player_cache() -> bool:
+	"""
+	yt-dlp の前処理済みプレイヤーのキャッシュを有効にする。差し替え先が見つからない場合は False を返す。
+	既定では無効で、抽出のたびに Deno がプレイヤー JS (約 3MB) を前処理し直す (本番機で約 1.5s)。
+	yt-dlp は古い版を消さないため、_prune_player_cache で掃除する
+	"""
+	try:
+		from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
+	except ImportError:
+		return False
+	if not hasattr(EJSBaseJCP, "_ENABLE_PREPROCESSED_PLAYER_CACHE"):
+		return False
+	EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE = True
+	return True
+
+def _prune_player_cache(ydl: Any) -> None:
+	"""前処理済みプレイヤーのキャッシュを、更新日時の新しい PLAYER_CACHE_KEEP 版だけ残して削除する。失敗しても無視する"""
+	try:
+		cache_dir = pathlib.Path(ydl.cache._get_root_dir()) / _SOLVER_CACHE_SECTION
+		files = sorted(cache_dir.glob(f"{_PLAYER_CACHE_PREFIX}*"), key=lambda path: path.stat().st_mtime, reverse=True)
+	except (AttributeError, OSError):
+		return
+	for path in files[PLAYER_CACHE_KEEP:]:
+		# 他のワーカーが同時に消した場合も無視する
+		path.unlink(missing_ok=True)
+
+def _warm_up_connection(ydl: Any) -> None:
+	"""YouTube への接続を確立しておく (接続は YoutubeDL ごとに使い回される)。失敗しても抽出時に接続し直すだけなので無視する"""
+	try:
+		with ydl.urlopen(WARMUP_URL) as response:
+			response.read()
+	except Exception:
+		pass
 
 def _stream_options() -> dict[str, Any]:
 	"""
@@ -97,12 +140,14 @@ def _get_ydl(mode: str) -> Any:
 
 def init_worker() -> None:
 	"""
-	子プロセス起動時の初期化。親の監視を開始し、よく使うモードの YoutubeDL の生成と Cookie の読み込みを済ませて初回抽出を速くする。
+	子プロセス起動時の初期化。親の監視を開始し、よく使うモードの YoutubeDL の生成・Cookie の読み込み・接続の確立を済ませて初回抽出を速くする。
+	- 前処理済みプレイヤーのキャッシュを有効にし、古い版を掃除する
 	- 予備設定 (stream_fallback) はめったに使わないため、初めて必要になったときに生成する
 	- 起動方法に左右されないよう、通常の優先度 (Priority.CURRENT) から始める
 	"""
 	set_priority(Priority.CURRENT)
 	_start_parent_watchdog()
+	_enable_player_cache()
 	_options.update(_build_options())
 	for mode in _EAGER_MODES:
 		ydl = _get_ydl(mode)
@@ -112,6 +157,8 @@ def init_worker() -> None:
 		except Exception:
 			# 読み込みに失敗しても抽出時に再試行されるため、起動は継続する
 			pass
+		_warm_up_connection(ydl)
+	_prune_player_cache(_get_ydl("stream"))
 
 def ping() -> bool:
 	"""ワーカープロセスを起動させるための空処理"""
