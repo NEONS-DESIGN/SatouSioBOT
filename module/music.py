@@ -327,6 +327,15 @@ async def play_next_song(ctx: commands.Context) -> None:
 	except Exception as e:
 		logger.exception(f"次曲の再生処理で予期せぬエラー (ギルド {guild.id}): {e}")
 
+def _is_stale(guild: discord.Guild, player: GuildMusicPlayer, vc: discord.VoiceClient) -> bool:
+	"""待機中にプレイヤーが破棄された、または VC が切断されたかを返す。切断時はプレイヤーも破棄する"""
+	if server_music_data.get(guild.id) is not player:
+		return True
+	if not vc.is_connected():
+		discard_player(guild.id)
+		return True
+	return False
+
 async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 	"""play_next_song の本体。advance_lock 取得済みで呼ぶこと"""
 	guild = ctx.guild
@@ -369,19 +378,22 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 			perf("stream_url待ち", (time.perf_counter() - t_wait) * 1000)
 		if player.volume is None:
 			player.volume = (await get_guild_settings(guild.id)).volume
-		# 待機中に破棄・切断されていないか再確認する
-		if server_music_data.get(guild.id) is not player:
+		if _is_stale(guild, player, vc):
 			return
-		if not vc.is_connected():
-			discard_player(guild.id)
-			return
+		source: YTDLSource | None = None
 		try:
 			t_ff = time.perf_counter()
-			source = YTDLSource(track, player.volume)
-			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop()))
+			# FFmpeg の起動 (CreateProcess) は高負荷時に数十秒ブロックしうるため、イベントループ外で行う
+			source = await asyncio.to_thread(YTDLSource, track, player.volume)
 			perf("FFmpeg起動", (time.perf_counter() - t_ff) * 1000)
+			if _is_stale(guild, player, vc):
+				source.cleanup()
+				return
+			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop()))
 		except Exception as e:
 			logger.error(f"再生ソース生成エラー (ギルド {guild.id}): {e}")
+			if source is not None:
+				source.cleanup()
 			player.current = None
 			await _notify(playback_error_embed(ctx, track["title"]))
 			continue
