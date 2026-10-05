@@ -93,9 +93,11 @@ _BASE_OPTIONS: dict[str, Any] = {
 }
 
 # メタデータのみ取得 (検索・プレイリスト展開用。ストリームURLは解決しない)
+# extract_flat=True は最上位の転送も解決しないため、プレイリストへ転送される URL
+# (youtu.be/ID?list=... や watch?v=ID&list=...) が entries の無い結果になる。"in_playlist" は転送を追い、中身だけ平坦に取る
 FAST_META_OPTIONS: dict[str, Any] = {
 	**_BASE_OPTIONS,
-	"extract_flat": True,
+	"extract_flat": "in_playlist",
 	"extractor_args": {"nicovideo": _NICOVIDEO_ARGS},
 }
 

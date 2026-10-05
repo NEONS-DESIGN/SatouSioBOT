@@ -1,10 +1,12 @@
 """
 プロセスの CPU 優先度の設定。
 再生中の音声 > 再生待ちの曲の抽出 > 次曲の先読み > それ以降の先読み の順に CPU を割り当てる。
-Windows の優先度クラスで実装しており、その他の OS では何もしない。(一般権限では優先度を上げ直せないため)
+再生中の音声のうち、送信スレッドはさらにスレッド優先度を最上位にする。
+Windows の優先度クラス・スレッド優先度で実装しており、その他の OS では何もしない。(一般権限では優先度を上げ直せないため)
 """
 import enum
 import sys
+import threading
 
 class Priority(enum.IntEnum):
 	"""処理の優先度。値が小さいほど優先する"""
@@ -20,14 +22,21 @@ class Priority(enum.IntEnum):
 # Priority に対応する Windows の優先度クラス (SetPriorityClass の引数)
 # LATER は IDLE にしない。始まった抽出の優先度は後から上げられず、スキップで現在の曲になったときに
 # CPU の空き待ちで止まりうるため。NEXT との順序は先読みを1曲ずつ順に行うことで守る
+# PLAYBACK を REALTIME にしないのは、管理者権限が無いと HIGH に落とされ、権限があってもマウス入力やディスクの書き出しなど
+# OS 自体の処理より優先されて固まりうるため
 _WINDOWS_PRIORITY_CLASSES = {
-	Priority.PLAYBACK: 0x00008000,  # ABOVE_NORMAL_PRIORITY_CLASS
+	Priority.PLAYBACK: 0x00000080,  # HIGH_PRIORITY_CLASS
 	Priority.CURRENT: 0x00000020,   # NORMAL_PRIORITY_CLASS
 	Priority.NEXT: 0x00004000,      # BELOW_NORMAL_PRIORITY_CLASS
 	Priority.LATER: 0x00004000,     # BELOW_NORMAL_PRIORITY_CLASS
 }
 # OpenProcess で優先度の変更に必要なアクセス権
 _PROCESS_SET_INFORMATION = 0x0200
+# 音声の送信スレッドに設定するスレッド優先度 (優先度クラスの中で最上位。HIGH クラスでは 15)
+_THREAD_PRIORITY_TIME_CRITICAL = 15
+
+# スレッドごとの優先度の設定結果 (スレッドが終われば消える)
+_boosted_threads = threading.local()
 
 if sys.platform == "win32":
 	import ctypes
@@ -41,6 +50,9 @@ if sys.platform == "win32":
 	_kernel32.SetPriorityClass.restype = wintypes.BOOL
 	_kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
 	_kernel32.CloseHandle.restype = wintypes.BOOL
+	_kernel32.GetCurrentThread.restype = wintypes.HANDLE
+	_kernel32.SetThreadPriority.argtypes = (wintypes.HANDLE, ctypes.c_int)
+	_kernel32.SetThreadPriority.restype = wintypes.BOOL
 
 def set_priority(priority: Priority, pid: int | None = None) -> bool:
 	"""
@@ -60,3 +72,16 @@ def set_priority(priority: Priority, pid: int | None = None) -> bool:
 		return bool(_kernel32.SetPriorityClass(handle, priority_class))
 	finally:
 		_kernel32.CloseHandle(handle)
+
+def boost_playback_thread() -> bool:
+	"""
+	呼び出したスレッド (音声の送信スレッド) をプロセス内で最優先にする。成功時 True、Windows 以外・失敗時は False (例外は出さない)。
+	毎フレーム呼ばれても、設定はスレッドごとに初回だけ行い、以降は初回の結果を返す
+	"""
+	result = getattr(_boosted_threads, "result", None)
+	if result is None:
+		result = sys.platform == "win32" and bool(
+			_kernel32.SetThreadPriority(_kernel32.GetCurrentThread(), _THREAD_PRIORITY_TIME_CRITICAL)
+		)
+		_boosted_threads.result = result
+	return result

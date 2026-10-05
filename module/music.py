@@ -20,7 +20,7 @@ from module.embed import (
 from module.errors import AudioOpenError, UserFacingError, report_error
 from module.logger import get_bot_logger, perf
 from module.options import FFMPEG_OPTIONS, app_config
-from module.priority import Priority, set_priority
+from module.priority import Priority, boost_playback_thread, set_priority
 from module.sqlite import get_guild_settings
 from module.utils import loading_spinner
 
@@ -564,7 +564,8 @@ class YTDLSource(discord.FFmpegOpusAudio):
 			self._primed = None
 
 	def read(self) -> bytes:
-		"""次の 20ms 分の Opus パケットを返し、元音源での再生位置を進める"""
+		"""次の 20ms 分の Opus パケットを返し、元音源での再生位置を進める。呼び出し元の送信スレッドを最優先にする"""
+		boost_playback_thread()
 		started = time.perf_counter()
 		data = self._primed if self._primed is not None else self._read_packet()
 		self._primed = None
