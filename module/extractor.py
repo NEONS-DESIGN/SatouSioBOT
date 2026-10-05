@@ -8,6 +8,7 @@ import multiprocessing.connection
 import os
 import pathlib
 import threading
+import urllib.parse
 from typing import Any
 
 from module.options import (
@@ -37,6 +38,15 @@ _PLAYER_CACHE_PREFIX = "player,3A"
 PLAYER_CACHE_KEEP = 2
 # ワーカー起動時に接続を確立しておくための軽い URL (最初の HTTP リクエストに約 0.9s の固定費があるため)
 WARMUP_URL = "https://www.youtube.com/generate_204"
+
+# ミックス (YouTube Music のラジオ等) の再生リスト ID の接頭辞。動画 ID 無しでは YouTube が開けない (This playlist type is unviewable)
+_MIX_PLAYLIST_PREFIX = "RD"
+# ミックスの URL として扱う YouTube のホスト
+_YOUTUBE_HOSTS = frozenset(("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"))
+# YouTube の /next API (web クライアント) の応答で、ミックスの曲の動画 ID がある場所
+_MIX_VIDEO_ID_PATH = ("contents", "twoColumnWatchNextResults", "playlist", "playlist", "contents", ..., "playlistPanelVideoRenderer", "videoId", {str})
+# 先頭の曲を付けたミックスの URL
+_MIX_WATCH_URL = "https://www.youtube.com/watch?{query}"
 
 # 子プロセスごとのモード別オプションと、使い回す YoutubeDL インスタンス (init_worker で設定する)
 _options: dict[str, dict[str, Any]] = {}
@@ -217,9 +227,46 @@ def extract(query: str, is_fast: bool, priority: Priority = Priority.CURRENT) ->
 	except Exception as e:
 		raise ExtractionError(str(e)) from None
 
+def _mix_playlist_id(query: str) -> str | None:
+	"""query が動画 ID の無い YouTube のミックスの URL なら、その再生リスト ID を返す (それ以外は None)"""
+	try:
+		parsed = urllib.parse.urlparse(query)
+	except ValueError:
+		return None
+	if parsed.hostname not in _YOUTUBE_HOSTS:
+		return None
+	params = urllib.parse.parse_qs(parsed.query)
+	playlist_id = next(iter(params.get("list", ())), "")
+	if not playlist_id.startswith(_MIX_PLAYLIST_PREFIX) or params.get("v"):
+		return None
+	return playlist_id
+
+def _resolve_mix_url(query: str) -> str:
+	"""
+	動画 ID の無いミックスの URL (music.youtube.com/playlist?list=RD... 等) を、先頭の曲の動画 ID を付けた watch URL にして返す。
+	yt-dlp はミックスを watch ページからしか取得できないため、/next API で先頭の曲を求める。
+	該当しない・先頭の曲を取得できない場合は query をそのまま返す (yt-dlp の本来のエラーになる)
+	"""
+	playlist_id = _mix_playlist_id(query)
+	if playlist_id is None:
+		return query
+	from yt_dlp.utils import traverse_obj
+	try:
+		response = _get_ydl("meta").get_info_extractor("YoutubeTab")._extract_response(
+			item_id=playlist_id, query={"playlistId": playlist_id}, ep="next", check_get_keys="contents",
+		)
+	except Exception:
+		# 通信失敗・yt-dlp の内部構成の変更など。元の URL で抽出させる
+		return query
+	video_id = traverse_obj(response, _MIX_VIDEO_ID_PATH, get_all=False)
+	if not video_id:
+		return query
+	return _MIX_WATCH_URL.format(query=urllib.parse.urlencode({"v": video_id, "list": playlist_id}))
+
 def _extract(query: str, is_fast: bool) -> dict:
 	"""extract の本体。yt-dlp の例外をそのまま送出する"""
 	from yt_dlp.utils import DownloadError
+	query = _resolve_mix_url(query)
 	used_fallback = False
 	if is_fast:
 		info = _get_ydl("meta").extract_info(query, download=False)
