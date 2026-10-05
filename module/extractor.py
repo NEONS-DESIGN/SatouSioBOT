@@ -41,6 +41,8 @@ WARMUP_URL = "https://www.youtube.com/generate_204"
 # 子プロセスごとのモード別オプションと、使い回す YoutubeDL インスタンス (init_worker で設定する)
 _options: dict[str, dict[str, Any]] = {}
 _instances: dict[str, Any] = {}
+# 登録できた常駐 Deno のプロバイダのモジュール (登録前・失敗時は None)
+_resident_jsc: Any = None
 
 def _exit_when_parent_dies(sentinel: int) -> None:
 	"""親プロセスの終了を待ち、終了したらこのワーカーを即時終了する (監視スレッドで実行)"""
@@ -82,6 +84,26 @@ def _enable_player_cache() -> bool:
 		return False
 	EJSBaseJCP._ENABLE_PREPROCESSED_PLAYER_CACHE = True
 	return True
+
+def _register_resident_jsc() -> bool:
+	"""
+	常駐 Deno の JS チャレンジプロバイダを yt-dlp に登録する。登録できなければ False (標準の Deno プロバイダで解く)。
+	YoutubeDL が最初の抽出でプロバイダの一覧を作るため、抽出より前に呼ぶ
+	"""
+	global _resident_jsc
+	try:
+		# import でプロバイダが登録される
+		from module import resident_jsc
+	except Exception:
+		# yt-dlp の内部構成が変わった・登録済み など。ワーカーの起動は止めない
+		return False
+	_resident_jsc = resident_jsc
+	return True
+
+def _apply_resident_jsc_priority(priority: Priority) -> None:
+	"""常駐 Deno (登録済みで起動していれば) の CPU 優先度をワーカーに合わせる"""
+	if _resident_jsc is not None:
+		_resident_jsc.apply_priority(priority)
 
 def _prune_player_cache(ydl: Any) -> None:
 	"""前処理済みプレイヤーのキャッシュを、更新日時の新しい PLAYER_CACHE_KEEP 版だけ残して削除する。失敗しても無視する"""
@@ -142,12 +164,14 @@ def init_worker() -> None:
 	"""
 	子プロセス起動時の初期化。親の監視を開始し、よく使うモードの YoutubeDL の生成・Cookie の読み込み・接続の確立を済ませて初回抽出を速くする。
 	- 前処理済みプレイヤーのキャッシュを有効にし、古い版を掃除する
+	- JS チャレンジの解読を常駐 Deno で行うプロバイダを登録し、Deno の起動と最新のプレイヤーの読み込みを済ませておく
 	- 予備設定 (stream_fallback) はめったに使わないため、初めて必要になったときに生成する
 	- 起動方法に左右されないよう、通常の優先度 (Priority.CURRENT) から始める
 	"""
 	set_priority(Priority.CURRENT)
 	_start_parent_watchdog()
 	_enable_player_cache()
+	_register_resident_jsc()
 	_options.update(_build_options())
 	for mode in _EAGER_MODES:
 		ydl = _get_ydl(mode)
@@ -159,6 +183,8 @@ def init_worker() -> None:
 			pass
 		_warm_up_connection(ydl)
 	_prune_player_cache(_get_ydl("stream"))
+	if _resident_jsc is not None:
+		_resident_jsc.warm_up(_get_ydl("stream"))
 
 def ping() -> bool:
 	"""ワーカープロセスを起動させるための空処理"""
@@ -181,10 +207,11 @@ def extract(query: str, is_fast: bool, priority: Priority = Priority.CURRENT) ->
 	query の情報を取得して縮小した辞書を返す。
 	- is_fast=True : メタデータのみ (FAST_META_OPTIONS)
 	- is_fast=False: ストリームURL込み。失敗時は予備設定で再試行し、FALLBACK_FLAG を付与する
-	- priority: このワーカー (と yt-dlp が起動する Deno) の CPU 優先度。抽出ごとに設定し直す
+	- priority: このワーカー (と常駐 Deno・yt-dlp が起動する Deno) の CPU 優先度。抽出ごとに設定し直す
 	- 失敗時は ExtractionError を送出する
 	"""
 	set_priority(priority)
+	_apply_resident_jsc_priority(priority)
 	try:
 		return _extract(query, is_fast)
 	except Exception as e:
