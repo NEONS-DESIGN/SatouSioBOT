@@ -1,6 +1,6 @@
 <h1 align="center">SatouSioBOT</h1>
 <p align="center"><img width="140" src="https://raw.githubusercontent.com/NEONS-DESIGN/SatouSioBOT/refs/heads/main/img/logo.png"></p>
-<p align="center">砂糖塩という、Discordの音楽再生Botです。できるだけ起動するだけで使用ができるように制作されています。</p>
+<p align="center">砂糖塩という、Discordの音楽再生Botです。<br>並列処理やキャッシュなどを駆使しし高速・安定化を実現していますが、ある程度スペック・インターネット環境が良くないとむしろ遅くなってしまう場合があります。</p>
 
 <p align="center">
   <a href="https://www.python.org/downloads/release/python-3148/"><img src="https://img.shields.io/badge/Python-v3.14.x-ffde57" alt="Python"></a>
