@@ -3,7 +3,7 @@ import collections
 import concurrent.futures
 import itertools
 import time
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Iterable
 from typing import Any, TypeVar
 from urllib.parse import parse_qs, urlsplit
 
@@ -78,6 +78,8 @@ VOICE_BUILTIN_RECONNECT_WAIT = 65.0
 VOICE_STATE_POLL_INTERVAL = 0.5
 # 曲の残りがこの秒数 (元音源) 未満で切断された場合は、その曲を再開せずに次の曲へ進む
 RESUME_MIN_REMAINING = 5.0
+# 終了時に抽出ワーカーの終了を待つ最大秒数
+WORKER_EXIT_TIMEOUT = 5.0
 
 # ==========================================
 # バックグラウンドタスク管理
@@ -144,18 +146,24 @@ def shutdown_process_pool() -> None:
 	pool, _process_pool = _process_pool, None
 	if pool is None:
 		return
+	# shutdown() は内部のプロセス一覧を破棄するため、先に控えておく
+	processes = list((getattr(pool, "_processes", None) or {}).values())
 	# Python 3.14+ は公開 API で子プロセスを即時終了できる
 	terminate_workers = getattr(pool, "terminate_workers", None)
 	if terminate_workers is not None:
 		terminate_workers()
-		return
-	# shutdown() は内部のプロセス一覧を破棄するため、先に控えておく
-	processes = list((getattr(pool, "_processes", None) or {}).values())
-	pool.shutdown(wait=False, cancel_futures=True)
-	# 抽出中の子プロセスが残ると Python の終了がブロックされるため直接終了させる
+	else:
+		pool.shutdown(wait=False, cancel_futures=True)
+		# 抽出中の子プロセスが残ると Python の終了がブロックされるため直接終了させる
+		for process in processes:
+			if process.is_alive():
+				process.terminate()
+	# 再起動したときに古いワーカー (と常駐 Deno) が新しいものと並んで残らないよう、終了を見届ける
+	deadline = time.monotonic() + WORKER_EXIT_TIMEOUT
 	for process in processes:
+		process.join(max(deadline - time.monotonic(), 0))
 		if process.is_alive():
-			process.terminate()
+			logger.warning(f"抽出ワーカー (pid {process.pid}) が終了しませんでした。")
 
 def _reset_broken_pool(pool: concurrent.futures.ProcessPoolExecutor) -> None:
 	"""壊れたプロセスプールを破棄し、次回利用時に作り直させる"""
@@ -1154,6 +1162,22 @@ async def _await_quietly(task: asyncio.Task | None) -> Any:
 		return await task
 	except Exception:
 		return None
+
+def is_in_use(voice_clients: Iterable[discord.VoiceProtocol]) -> bool:
+	"""
+	どこかのサーバーで Bot が使われているか (定期再起動してよいかの判定に使う)。
+	- 再生中・一時停止中・キューあり・/p の処理中・曲の切り替え中・通信断の再接続待ちのプレイヤーがあれば使用中
+	- Bot のいる VC に聴者がいれば、何も再生していなくても使用中
+	"""
+	for player in server_music_data.values():
+		if player.current is not None or player.queue or player.pending_requests > 0 or player.advance_lock.locked() or player.lost_channel is not None:
+			return True
+	for vc in voice_clients:
+		if not isinstance(vc, discord.VoiceClient):
+			return True
+		if _is_active(vc) or (vc.channel is not None and _has_listener(vc.channel)):
+			return True
+	return False
 
 def _is_idle(player: GuildMusicPlayer, vc: discord.VoiceProtocol | None) -> bool:
 	"""再生中・再生準備中の曲もキューも無い状態か"""

@@ -1,4 +1,5 @@
 import configparser
+import datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,20 @@ def _parse_premium(value: str) -> bool | None:
 		return None
 	return configparser.ConfigParser.BOOLEAN_STATES.get(value)
 
+# daily_restart の既定値と書式 (24 時間表記の HH:MM)
+DAILY_RESTART_DEFAULT = "00:00"
+_DAILY_RESTART_FORMAT = "%H:%M"
+
+def _parse_daily_restart(value: str) -> datetime.time | None:
+	"""daily_restart の値を時刻に変換する。空欄は None (再起動しない)、解釈できない値は既定の時刻"""
+	value = value.strip()
+	if not value:
+		return None
+	try:
+		return datetime.datetime.strptime(value, _DAILY_RESTART_FORMAT).time()
+	except ValueError:
+		return datetime.datetime.strptime(DAILY_RESTART_DEFAULT, _DAILY_RESTART_FORMAT).time()
+
 class Config:
 	"""config.ini の [MusicBot] セクションを読み込む。キー欠落・型不正・ファイル欠落時はデフォルト値を使う"""
 	def __init__(self) -> None:
@@ -52,6 +67,8 @@ class Config:
 		self.DEBUG: bool = self._get("debug", False, bool)
 		# Cookie のアカウントが YouTube Premium か。None なら yt-dlp が初期データから判定する
 		self.YOUTUBE_PREMIUM: bool | None = _parse_premium(self._get("youtube_premium", PREMIUM_AUTO))
+		# 毎日この時刻を過ぎてから、使われていないときに Bot を再起動する。None なら再起動しない
+		self.DAILY_RESTART: datetime.time | None = _parse_daily_restart(self._get("daily_restart", DAILY_RESTART_DEFAULT))
 
 	@staticmethod
 	def _get(key: str, default: Any, value_type: type = str) -> Any:

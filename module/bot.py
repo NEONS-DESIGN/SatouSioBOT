@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import hashlib
 import json
 import os
@@ -22,14 +23,15 @@ from module.embed import (
 	shuffle_complete_embed,
 	skip_music_embed, speed_set_embed, user_not_here_embed, volume_set_embed,
 )
+from module.daily_restart import RESTART_EXIT_CODE, is_supervised, wait_for_restart
 from module.errors import report_error
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
-	SPEED_MAX, SPEED_MIN, MusicVoiceClient, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player,
+	SPEED_MAX, SPEED_MIN, MusicVoiceClient, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player, is_in_use,
 	mark_rtp_idle, monitor_loop_lag, play_music, play_now, requeue_track, server_music_data, shutdown_process_pool, spawn,
 	update_alone_timer, warmup_process_pool,
 )
-from module.options import BASE_DIR
+from module.options import BASE_DIR, app_config
 from module.priority import Priority, set_priority
 from module.setting import NotBotAdmin, setup_setting_commands
 from module.sqlite import close_db, init_db, save_guild_setting
@@ -63,16 +65,35 @@ class SatouSioBot(commands.Bot):
 		super().__init__(command_prefix="/", intents=intents, help_command=None, max_messages=None)
 		# メンション時のヘルプ案内に使う /help のコマンドメンション (同期後に </help:ID> へ更新)
 		self.help_mention = "`/help`"
+		# 定期再起動のために終了したか (main() が終了コードを決めるのに使う)
+		self.restart_requested = False
 
 	async def setup_hook(self) -> None:
 		"""起動時の非同期セットアップ: DB初期化 → 抽出ワーカー準備(並行) → 設定コマンド登録 → スラッシュコマンド同期"""
 		await init_db()
 		spawn(warmup_process_pool(), name="warmup_process_pool")
 		spawn(monitor_loop_lag(), name="loop_lag_monitor")
+		self._start_daily_restart()
 		setup_setting_commands(self)
 		registered = await self._sync_commands()
 		if help_command := discord.utils.get(registered, name="help"):
 			self.help_mention = help_command.mention
+
+	def _start_daily_restart(self) -> None:
+		"""config の daily_restart が有効で、start.ps1 から起動されていれば定期再起動の待ち合わせを始める"""
+		if app_config.DAILY_RESTART is None:
+			return
+		if not is_supervised():
+			logger.info("start.bat / start.ps1 以外から起動したため、定期再起動は行いません。")
+			return
+		spawn(self._daily_restart(app_config.DAILY_RESTART), name="daily_restart")
+
+	async def _daily_restart(self, at: datetime.time) -> None:
+		"""時刻 at を過ぎて使われていないときに Bot を終了し、start.ps1 に起動し直させる (抽出ワーカー・常駐 Deno も入れ替わる)"""
+		await wait_for_restart(at, lambda: is_in_use(self.voice_clients))
+		logger.info("定期再起動のため終了します。")
+		self.restart_requested = True
+		await self.close()
 
 	def _command_signature(self) -> str:
 		"""スラッシュコマンドの定義と Bot の ID から、前回の同期と同じ内容かを判定するハッシュを返す"""
@@ -551,6 +572,9 @@ def main() -> None:
 		_run_with_fast_loop(_run_bot(token))
 	except KeyboardInterrupt:
 		logger.info("Ctrl+C を受け付けたため終了しました。")
+		return
+	if bot.restart_requested:
+		sys.exit(RESTART_EXIT_CODE)
 
 if __name__ == "__main__":
 	main()

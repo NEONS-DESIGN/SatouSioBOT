@@ -1,5 +1,7 @@
+import asyncio
 from collections.abc import Iterable
 
+import aiohttp
 import discord
 from discord.ext import commands
 
@@ -31,6 +33,60 @@ _QUEUE_TITLE_LIMIT = 45
 _RAW_ERROR_LIMIT = 1500
 # Bot 側の問題によるエラーで、利用者向けの説明に添える一文
 _SERVER_ERROR_NOTE = "Bot 側の問題のため、時間をおいても直らない場合は Bot の管理者にお知らせください。"
+# 音源の準備中メッセージ。表示から PREPARING_SLOW_SECONDS 秒たっても準備が終わらなければ、待たせていることを詫びる文言に書き換える
+PREPARING_SLOW_SECONDS = 20
+_PREPARING_TITLE = "⏳ 準備中"
+_PREPARING_TEXT = "音源を準備しています..."
+_PREPARING_SLOW_TEXT = "大変時間がかかっており申し訳ございません。\n現在、音源を準備しております。もうしばらくお待ちください。"
+
+
+# ==========================================
+# 準備中メッセージの書き換え
+# ==========================================
+class _SlowNotice:
+	"""準備中メッセージを一定時間後に書き換えるタイマー。editing は書き換えの通信を始めたら True になる"""
+	__slots__ = ("task", "editing")
+
+	def __init__(self) -> None:
+		self.task: asyncio.Task | None = None
+		self.editing = False
+
+# 準備中メッセージの ID → 書き換えタイマー (書き換え済み・結果を表示済みのものは消す)
+_slow_notices: dict[int, _SlowNotice] = {}
+
+async def _show_slow_notice(message: discord.Message, notice: _SlowNotice) -> None:
+	"""PREPARING_SLOW_SECONDS 秒待ってから、準備中メッセージを待たせていることを詫びる文言に書き換える"""
+	await asyncio.sleep(PREPARING_SLOW_SECONDS)
+	notice.editing = True
+	try:
+		await message.edit(embed=discord.Embed(title=_PREPARING_TITLE, description=_PREPARING_SLOW_TEXT, color=_YELLOW))
+	except (discord.HTTPException, aiohttp.ClientError, OSError) as e:
+		# 削除済み・通信断など。表示の書き換えだけなので再生の処理には影響させない
+		logger.debug(f"準備中メッセージを書き換えられませんでした: {e!r}")
+
+def _schedule_slow_notice(message: discord.Message) -> None:
+	"""準備中メッセージの書き換えタイマーを開始する"""
+	notice = _SlowNotice()
+	notice.task = asyncio.create_task(_show_slow_notice(message, notice), name=f"slow_notice:{message.id}")
+	_slow_notices[message.id] = notice
+	def _on_done(task: asyncio.Task) -> None:
+		if _slow_notices.get(message.id) is notice:
+			del _slow_notices[message.id]
+		if not task.cancelled() and (exc := task.exception()) is not None:
+			logger.error(f"準備中メッセージの書き換えで例外: {exc!r}")
+	notice.task.add_done_callback(_on_done)
+
+async def _settle_slow_notice(message: discord.Message) -> None:
+	"""
+	message の書き換えタイマーを止める (準備中メッセージを結果の表示に置き換える前に呼ぶ)。
+	- 書き換えの通信が始まっていれば、結果の表示が後から上書きされないよう完了を待つ
+	"""
+	notice = _slow_notices.pop(message.id, None)
+	if notice is None or notice.task is None or notice.task.done():
+		return
+	if not notice.editing:
+		notice.task.cancel()
+	await asyncio.wait({notice.task})
 
 
 # ==========================================
@@ -39,6 +95,7 @@ _SERVER_ERROR_NOTE = "Bot 側の問題のため、時間をおいても直らな
 async def _send_or_edit(ctx: commands.Context, embed: discord.Embed, edit_msg: discord.Message | None = None, ephemeral: bool = False) -> discord.Message:
 	"""edit_msg があれば編集し、失敗 (削除済みなど) または未指定なら新規送信する"""
 	if edit_msg:
+		await _settle_slow_notice(edit_msg)
 		try:
 			return await edit_msg.edit(embed=embed)
 		except discord.HTTPException:
@@ -265,8 +322,13 @@ async def music_info_embed(ctx: commands.Context, source: discord.AudioSource, q
 			pass
 
 async def preparing_audio_embed(ctx: commands.Context) -> discord.Message:
-	"""音源準備中のウェイトメッセージを送信して、そのMessageオブジェクトを返す"""
-	return await _send(ctx, "⏳ 準備中", "音源を準備しています...", _YELLOW)
+	"""
+	音源準備中のウェイトメッセージを送信して、そのMessageオブジェクトを返す。
+	- PREPARING_SLOW_SECONDS 秒たっても結果の表示に置き換わらなければ、待たせていることを詫びる文言に書き換える
+	"""
+	message = await _send(ctx, _PREPARING_TITLE, _PREPARING_TEXT, _YELLOW)
+	_schedule_slow_notice(message)
+	return message
 
 
 # ==========================================
