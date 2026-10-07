@@ -22,7 +22,7 @@ FALLBACK_FLAG = "_used_fallback"
 # 親プロセスへ返すキー (formats 等の巨大なデータをプロセス間で受け渡さないため)
 _KEEP_KEYS = ("id", "title", "url", "webpage_url", "original_url", "duration", "thumbnail", "http_headers")
 
-# 抽出モード: meta=メタデータのみ / stream=ストリームURLまで / stream_fallback=stream 失敗時の予備
+# 抽出モード: meta=メタデータのみ / stream=ストリームURLまで / stream_fallback=stream 失敗時の予備。起動時に生成するモード
 _EAGER_MODES = ("meta", "stream")
 
 # 本抽出で省略する YouTube の初期データ (/next API) を表す player_skip の値
@@ -31,17 +31,19 @@ _SKIP_INITIAL_DATA = "initial_data"
 # 親プロセスの終了を検知してワーカーを終了させるときの終了コード
 _ORPHAN_EXIT_CODE = 1
 
-# yt-dlp のキャッシュのうち、署名・n チャレンジの解決 (Deno) に関するものを置く区画と、前処理済みプレイヤーのファイル名の接頭辞
-_SOLVER_CACHE_SECTION = "challenge-solver"
-_PLAYER_CACHE_PREFIX = "player,3A"
+# yt-dlp のキャッシュで前処理済みプレイヤーを保存するキーの接頭辞 (キーは "player:<プレイヤーの URL>")
+PLAYER_CACHE_KEY_PREFIX = "player:"
 # 前処理済みプレイヤーのキャッシュを残す版数 (1 版あたり約 4MB。YouTube がプレイヤーを更新するたびに増える)
 PLAYER_CACHE_KEEP = 2
-# ワーカー起動時に接続を確立しておくための軽い URL (最初の HTTP リクエストに約 0.9s の固定費があるため)
-WARMUP_URL = "https://www.youtube.com/generate_204"
+# ワーカー起動時に接続を確立しておく軽い URL (モードごとに抽出で使うホスト。web_music の API は music.youtube.com)
+_WARMUP_URLS = {
+	"meta": ("https://www.youtube.com/generate_204",),
+	"stream": ("https://www.youtube.com/generate_204", "https://music.youtube.com/generate_204"),
+}
 
 # ミックス (YouTube Music のラジオ等) の再生リスト ID の接頭辞。動画 ID 無しでは YouTube が開けない (This playlist type is unviewable)
-_MIX_PLAYLIST_PREFIX = "RD"
-# ミックスの URL として扱う YouTube のホスト
+MIX_PLAYLIST_PREFIX = "RD"
+# YouTube のホスト (再生リストの URL の判定に使う)
 _YOUTUBE_HOSTS = frozenset(("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"))
 # YouTube の /next API (web クライアント) の応答で、ミックスの曲の動画 ID がある場所
 _MIX_VIDEO_ID_PATH = ("contents", "twoColumnWatchNextResults", "playlist", "playlist", "contents", ..., "playlistPanelVideoRenderer", "videoId", {str})
@@ -53,6 +55,27 @@ _options: dict[str, dict[str, Any]] = {}
 _instances: dict[str, Any] = {}
 # 登録できた常駐 Deno のプロバイダのモジュール (登録前・失敗時は None)
 _resident_jsc: Any = None
+
+def youtube_params(url: str) -> dict[str, list[str]] | None:
+	"""url が YouTube の URL ならクエリのパラメータを返す (それ以外・解釈できない URL は None)"""
+	try:
+		parsed = urllib.parse.urlsplit(url)
+	except ValueError:
+		return None
+	if parsed.hostname not in _YOUTUBE_HOSTS:
+		return None
+	return urllib.parse.parse_qs(parsed.query)
+
+def player_cache_files(ydl: Any) -> list[pathlib.Path]:
+	"""yt-dlp のキャッシュにある前処理済みプレイヤーのファイルを、更新日時の新しい順に返す (読めなければ空)"""
+	# yt-dlp はキーを URL エンコードし、% を , に置き換えたファイル名で保存する
+	prefix = urllib.parse.quote(PLAYER_CACHE_KEY_PREFIX, safe="").replace("%", ",")
+	try:
+		from yt_dlp.extractor.youtube.jsc._builtin.ejs import EJSBaseJCP
+		cache_dir = pathlib.Path(ydl.cache._get_root_dir()) / EJSBaseJCP._CACHE_SECTION
+		return sorted(cache_dir.glob(f"{prefix}*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+	except (ImportError, AttributeError, OSError):
+		return []
 
 def _exit_when_parent_dies(sentinel: int) -> None:
 	"""親プロセスの終了を待ち、終了したらこのワーカーを即時終了する (監視スレッドで実行)"""
@@ -82,8 +105,7 @@ def _pin_premium_status(is_premium: bool) -> bool:
 
 def _enable_player_cache() -> bool:
 	"""
-	yt-dlp の前処理済みプレイヤーのキャッシュを有効にする。差し替え先が見つからない場合は False を返す。
-	既定では無効で、抽出のたびに Deno がプレイヤー JS (約 3MB) を前処理し直す (本番機で約 1.5s)。
+	yt-dlp の前処理済みプレイヤーのキャッシュを有効にする (既定では抽出のたびに Deno が前処理し直す)。差し替え先が無ければ False。
 	yt-dlp は古い版を消さないため、_prune_player_cache で掃除する
 	"""
 	try:
@@ -117,19 +139,17 @@ def _apply_resident_jsc_priority(priority: Priority) -> None:
 
 def _prune_player_cache(ydl: Any) -> None:
 	"""前処理済みプレイヤーのキャッシュを、更新日時の新しい PLAYER_CACHE_KEEP 版だけ残して削除する。失敗しても無視する"""
-	try:
-		cache_dir = pathlib.Path(ydl.cache._get_root_dir()) / _SOLVER_CACHE_SECTION
-		files = sorted(cache_dir.glob(f"{_PLAYER_CACHE_PREFIX}*"), key=lambda path: path.stat().st_mtime, reverse=True)
-	except (AttributeError, OSError):
-		return
-	for path in files[PLAYER_CACHE_KEEP:]:
-		# 他のワーカーが同時に消した場合も無視する
-		path.unlink(missing_ok=True)
+	for path in player_cache_files(ydl)[PLAYER_CACHE_KEEP:]:
+		try:
+			# 他のワーカーが同時に消した場合も無視する
+			path.unlink(missing_ok=True)
+		except OSError:
+			pass
 
-def _warm_up_connection(ydl: Any) -> None:
-	"""YouTube への接続を確立しておく (接続は YoutubeDL ごとに使い回される)。失敗しても抽出時に接続し直すだけなので無視する"""
+def _warm_up_connection(ydl: Any, url: str) -> None:
+	"""url のホストへの接続を確立しておく (接続は YoutubeDL ごとに使い回される)。失敗しても抽出時に接続し直すだけなので無視する"""
 	try:
-		with ydl.urlopen(WARMUP_URL) as response:
+		with ydl.urlopen(url) as response:
 			response.read()
 	except Exception:
 		pass
@@ -137,8 +157,7 @@ def _warm_up_connection(ydl: Any) -> None:
 def _stream_options() -> dict[str, Any]:
 	"""
 	本抽出のオプションを返す。youtube_premium が明示されていれば、初期データ (/next API) の取得を省いたものにする。
-	初期データは再生に不要だが、yt-dlp は Premium 判定にのみ使うため、先に判定を設定値で固定しておく。
-	固定できなければ高音質フォーマットを選ばなくなるため、省略しない。
+	初期データは Premium 判定にしか使われないため先に判定を固定する。固定できなければ高音質を選ばなくなるため省略しない
 	"""
 	is_premium = app_config.YOUTUBE_PREMIUM
 	if is_premium is None or not _pin_premium_status(is_premium):
@@ -153,13 +172,23 @@ def _stream_options() -> dict[str, Any]:
 		},
 	}
 
+class _SilentLogger:
+	"""yt-dlp の出力を捨てるロガー。失敗は例外として親プロセスへ送り、Bot のログに出すため、コンソールへの重複した出力を止める"""
+	def debug(self, message: str) -> None: ...
+	def info(self, message: str) -> None: ...
+	def warning(self, message: str) -> None: ...
+	def error(self, message: str) -> None: ...
+
 def _build_options() -> dict[str, dict[str, Any]]:
 	"""抽出モードごとの YoutubeDL オプションを返す"""
 	from yt_dlp.networking.impersonate import ImpersonateTarget
+	logger = _SilentLogger()
 	return {
-		"meta": FAST_META_OPTIONS,
-		"stream": _stream_options(),
-		"stream_fallback": {**STREAM_FALLBACK_OPTIONS, "impersonate": ImpersonateTarget.from_str(STREAM_FALLBACK_IMPERSONATE)},
+		"meta": {**FAST_META_OPTIONS, "logger": logger},
+		"stream": {**_stream_options(), "logger": logger},
+		"stream_fallback": {
+			**STREAM_FALLBACK_OPTIONS, "logger": logger, "impersonate": ImpersonateTarget.from_str(STREAM_FALLBACK_IMPERSONATE),
+		},
 	}
 
 def _get_ydl(mode: str) -> Any:
@@ -172,11 +201,8 @@ def _get_ydl(mode: str) -> Any:
 
 def init_worker() -> None:
 	"""
-	子プロセス起動時の初期化。親の監視を開始し、よく使うモードの YoutubeDL の生成・Cookie の読み込み・接続の確立を済ませて初回抽出を速くする。
-	- 前処理済みプレイヤーのキャッシュを有効にし、古い版を掃除する
-	- JS チャレンジの解読を常駐 Deno で行うプロバイダを登録し、Deno の起動と最新のプレイヤーの読み込みを済ませておく
-	- 予備設定 (stream_fallback) はめったに使わないため、初めて必要になったときに生成する
-	- 起動方法に左右されないよう、通常の優先度 (Priority.CURRENT) から始める
+	子プロセスの初期化。親の監視・プロバイダ登録のほか、よく使うモードの YoutubeDL の生成・Cookie の読み込み・接続の確立と、
+	常駐 Deno への最新のプレイヤーの読み込みを済ませて初回の抽出を速くする。優先度は起動方法に左右されないよう CURRENT から始める
 	"""
 	set_priority(Priority.CURRENT)
 	_start_parent_watchdog()
@@ -191,7 +217,8 @@ def init_worker() -> None:
 		except Exception:
 			# 読み込みに失敗しても抽出時に再試行されるため、起動は継続する
 			pass
-		_warm_up_connection(ydl)
+		for url in _WARMUP_URLS[mode]:
+			_warm_up_connection(ydl, url)
 	_prune_player_cache(_get_ydl("stream"))
 	if _resident_jsc is not None:
 		_resident_jsc.warm_up(_get_ydl("stream"))
@@ -229,17 +256,11 @@ def extract(query: str, is_fast: bool, priority: Priority = Priority.CURRENT) ->
 
 def _mix_playlist_id(query: str) -> str | None:
 	"""query が動画 ID の無い YouTube のミックスの URL なら、その再生リスト ID を返す (それ以外は None)"""
-	try:
-		parsed = urllib.parse.urlparse(query)
-	except ValueError:
+	params = youtube_params(query)
+	if params is None or params.get("v"):
 		return None
-	if parsed.hostname not in _YOUTUBE_HOSTS:
-		return None
-	params = urllib.parse.parse_qs(parsed.query)
 	playlist_id = next(iter(params.get("list", ())), "")
-	if not playlist_id.startswith(_MIX_PLAYLIST_PREFIX) or params.get("v"):
-		return None
-	return playlist_id
+	return playlist_id if playlist_id.startswith(MIX_PLAYLIST_PREFIX) else None
 
 def _resolve_mix_url(query: str) -> str:
 	"""
@@ -263,22 +284,28 @@ def _resolve_mix_url(query: str) -> str:
 		return query
 	return _MIX_WATCH_URL.format(query=urllib.parse.urlencode({"v": video_id, "list": playlist_id}))
 
+def _extract_stream(query: str) -> dict | None:
+	"""本抽出を行う。高速設定で失敗したら予備設定で取り直し、結果に FALLBACK_FLAG を付ける (両方失敗したら両方の理由を載せて送出する)"""
+	from yt_dlp.utils import DownloadError
+	try:
+		return _get_ydl("stream").extract_info(query, download=False)
+	except DownloadError as first_error:
+		try:
+			info = _get_ydl("stream_fallback").extract_info(query, download=False)
+		except Exception as fallback_error:
+			# 原因の分類 (errors.py) に高速設定の理由も使えるよう、両方の文言を残す
+			raise ExtractionError(f"{first_error} / 予備設定: {fallback_error}") from None
+	if info:
+		info[FALLBACK_FLAG] = True
+	return info
+
 def _extract(query: str, is_fast: bool) -> dict:
 	"""extract の本体。yt-dlp の例外をそのまま送出する"""
-	from yt_dlp.utils import DownloadError
 	query = _resolve_mix_url(query)
-	used_fallback = False
-	if is_fast:
-		info = _get_ydl("meta").extract_info(query, download=False)
-	else:
-		try:
-			info = _get_ydl("stream").extract_info(query, download=False)
-		except DownloadError:
-			info = _get_ydl("stream_fallback").extract_info(query, download=False)
-			used_fallback = True
+	info = _get_ydl("meta").extract_info(query, download=False) if is_fast else _extract_stream(query)
 	if not info:
 		raise ValueError(f"情報を取得できませんでした: {query}")
 	result = _slim(info)
-	if used_fallback:
+	if info.get(FALLBACK_FLAG):
 		result[FALLBACK_FLAG] = True
 	return result

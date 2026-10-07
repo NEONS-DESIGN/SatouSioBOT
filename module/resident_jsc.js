@@ -9,8 +9,10 @@
 //     それ以外は yt-dlp-ejs の jsc() の出力 ({type: "result", responses, preprocessed_player?})
 //   失敗時は {type: "error", error}
 
-// 標準出力は応答専用にする (評価したスクリプトが console.log を使っても、応答の行とずれないよう標準エラーへ回す)
-console.log = console.info = console.debug = console.error;
+// 標準出力は応答専用にする (評価したスクリプトが console に書いても、応答の行とずれないよう標準エラーへ回す)
+for (const name of ["log", "info", "debug", "dir", "dirxml", "table", "trace", "count", "timeLog", "timeEnd", "group", "groupCollapsed"]) {
+	console[name] = (...args) => console.error(...args);
+}
 
 // 前処理済みプレイヤーを保持する版数 (1 版あたり約 4MB。別の版が必要になると Python 側がプロセスごと起動し直す)
 const PLAYER_KEEP = 1;

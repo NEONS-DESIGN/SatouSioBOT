@@ -36,18 +36,21 @@ def bot_admin_only():
 		raise NotBotAdmin()
 	return commands.check(predicate)
 
+async def _show_setting_help(ctx: commands.Context) -> None:
+	"""サブコマンド無しで実行されたグループの案内を表示する"""
+	if ctx.invoked_subcommand is None:
+		await setting_help_embed(ctx)
+
 def setup_setting_commands(bot: commands.Bot) -> None:
 	"""設定用コマンド群 (/setting) をBotに登録する"""
 	@bot.hybrid_group(name="setting", description="Botの設定を変更します。")
 	@commands.guild_only()
 	async def setting(ctx: commands.Context) -> None:
-		if ctx.invoked_subcommand is None:
-			await setting_help_embed(ctx)
+		await _show_setting_help(ctx)
 
 	@setting.group(name="admin", description="Bot管理者に関する設定を行います。")
 	async def setting_admin(ctx: commands.Context) -> None:
-		if ctx.invoked_subcommand is None:
-			await setting_help_embed(ctx)
+		await _show_setting_help(ctx)
 
 	@setting_admin.command(name="add", description="特定のユーザーにBotの操作権限を付与します。")
 	@bot_admin_only()
@@ -63,8 +66,7 @@ def setup_setting_commands(bot: commands.Bot) -> None:
 
 	@setting.group(name="limit", description="上限に関する設定を行います。")
 	async def setting_limit(ctx: commands.Context) -> None:
-		if ctx.invoked_subcommand is None:
-			await setting_help_embed(ctx)
+		await _show_setting_help(ctx)
 
 	@setting_limit.command(name="queue", description=f"キューの最大曲数を設定します。(1〜{MAX_LIMIT})")
 	@bot_admin_only()

@@ -37,14 +37,18 @@ class AudioOpenError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _Rule:
-	"""エラー文 (小文字) に keywords のいずれかが含まれれば該当する分類規則"""
+	"""エラー文 (小文字) に keywords のいずれかが含まれれば該当する分類規則。transient は利用者側の原因でも一時的に起こりうるもの"""
 	keywords: tuple[str, ...]
 	cause: ErrorCause
 	message: str
 	admin_hint: str | None = None
+	transient: bool = False
+
+# 利用者側の文言でも、一時的な制限を表すもの (再試行で直りうる)
+_TRANSIENT_MARKERS = ("try again later",)
 
 # yt-dlp・管理者向けの対処で共通に使う文言
-_UPDATE_YTDLP = "`venv\\Scripts\\python.exe -m pip install -U yt-dlp yt-dlp-ejs` で yt-dlp を更新し、Bot を再起動してください。"
+_UPDATE_YTDLP = "`venv\\Scripts\\python.exe -m pip install -U \"yt-dlp[default,curl-cffi]\"` で yt-dlp を更新し、Bot を再起動してください。"
 _RELOGIN = "ホストの Firefox で YouTube にログインし直し、Bot を再起動してください。(Cookie は起動時に読み込むため)"
 _VOICE_LIBRARY_INFO = ErrorInfo(
 	ErrorCause.SERVER,
@@ -54,11 +58,6 @@ _VOICE_LIBRARY_INFO = ErrorInfo(
 
 # 例外の型で判定する規則 (エラー文より優先する)
 _TYPE_RULES: tuple[tuple[type[BaseException], ErrorInfo], ...] = (
-	(UnicodeError, ErrorInfo(
-		ErrorCause.SERVER,
-		"Bot の実行環境の文字コード設定に問題があるため、処理を続けられませんでした。",
-		"コンソールの出力が UTF-8 ではありません (cp932 など)。start.bat から起動するか、環境変数 PYTHONIOENCODING=utf-8 を設定して Bot を再起動してください。",
-	)),
 	(concurrent.futures.process.BrokenProcessPool, ErrorInfo(
 		ErrorCause.SERVER,
 		"曲の情報を取得する処理が異常終了しました。もう一度お試しください。",
@@ -66,8 +65,8 @@ _TYPE_RULES: tuple[tuple[type[BaseException], ErrorInfo], ...] = (
 	)),
 	(TimeoutError, ErrorInfo(
 		ErrorCause.SERVER,
-		"ボイスチャンネルへの接続がタイムアウトしました。",
-		"Bot のロールに、そのボイスチャンネルの「接続」「発言」権限があるか確認してください。",
+		"Discord との通信 (ボイスチャンネルへの接続など) がタイムアウトしました。",
+		"Bot のネットワーク接続と、Bot のロールにそのボイスチャンネルの「接続」「発言」権限があるか確認してください。",
 	)),
 	(discord.Forbidden, ErrorInfo(
 		ErrorCause.SERVER,
@@ -110,7 +109,7 @@ _TEXT_RULES: tuple[_Rule, ...] = (
 	_Rule(("unsupported url", "is not a valid url"), ErrorCause.USER,
 		"対応していないサイト、または動画・曲のページではない URL です。YouTube・ニコニコ動画・SoundCloud などの動画や曲のページの URL を指定してください。"),
 	_Rule(("could not resolve host", "getaddrinfo failed", "name or service not known", "nodename nor servname"), ErrorCause.USER,
-		"サイトに接続できませんでした。URL (ドメイン名) が正しいか確認してください。"),
+		"サイトに接続できませんでした。URL (ドメイン名) が正しいか確認してください。", transient=True),
 	# ---- Bot 側 ----
 	_Rule(("http error 403", "403: forbidden"), ErrorCause.SERVER,
 		"動画サイトにアクセスを拒否されました。",
@@ -145,15 +144,27 @@ def describe_error(error: BaseException) -> ErrorInfo:
 	for error_type, info in _TYPE_RULES:
 		if isinstance(error, error_type):
 			return info
-	text = str(error).lower()
-	for rule in _TEXT_RULES:
-		if any(keyword in text for keyword in rule.keywords):
-			return ErrorInfo(rule.cause, rule.message, rule.admin_hint)
+	if (rule := _match_rule(str(error).lower())) is not None:
+		return ErrorInfo(rule.cause, rule.message, rule.admin_hint)
 	return ErrorInfo(ErrorCause.UNKNOWN, str(error) or type(error).__name__)
 
-def report_error(context: str, error: BaseException) -> ErrorInfo:
+def _match_rule(text: str) -> _Rule | None:
+	"""小文字にしたエラー文に当てはまる最初の規則を返す"""
+	return next((rule for rule in _TEXT_RULES if any(keyword in text for keyword in rule.keywords)), None)
+
+def is_permanent(error: BaseException) -> bool:
+	"""再試行しても直らない利用者側の原因 (削除・非公開・年齢制限など) か。DNS の失敗・回数制限など一時的に起こりうるものは False"""
+	if describe_error(error).cause is not ErrorCause.USER:
+		return False
+	text = str(error).lower()
+	if any(marker in text for marker in _TRANSIENT_MARKERS):
+		return False
+	rule = _match_rule(text)
+	return rule is None or not rule.transient
+
+def report_error(context: str, error: BaseException) -> None:
 	"""
-	error を分類してログに出し、分類結果を返す。
+	error を分類してログに出す。
 	- USER: INFO (利用者の入力の問題で、Bot の異常ではないため)
 	- SERVER: ERROR (管理者向けの対処も出す)
 	- UNKNOWN: ERROR (トレースバック付き)
@@ -165,4 +176,3 @@ def report_error(context: str, error: BaseException) -> ErrorInfo:
 		logger.error(f"{context}: {info.message} 対処: {info.admin_hint} ({error!r})")
 	else:
 		logger.error(f"{context}: 想定外のエラー {error!r}", exc_info=error)
-	return info

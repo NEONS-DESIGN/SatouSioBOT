@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import re
 import sys
@@ -23,24 +24,14 @@ def _tolerate_console_encoding() -> None:
 	UnicodeEncodeError が起きてログが失われるため
 	"""
 	for stream in (sys.stdout, sys.stderr):
-		reconfigure = getattr(stream, "reconfigure", None)
-		if reconfigure is None:
-			continue
-		try:
-			reconfigure(errors=_CONSOLE_ENCODE_ERRORS)
-		except (ValueError, OSError):
-			# 既に閉じられている・書き込み途中などで変更できない場合は元の設定のまま使う
-			pass
+		# 置き換えられた・閉じられたストリームなど、変更できない場合は元の設定のまま使う
+		with contextlib.suppress(AttributeError, ValueError, OSError):
+			stream.reconfigure(errors=_CONSOLE_ENCODE_ERRORS)
 
 class ConsoleFilter(logging.Filter):
-	"""
-	discordライブラリが発信するINFO以下のログをコンソールから除外する。
-	ERRORやWARNINGは通過させる。
-	"""
+	"""discord ライブラリの WARNING 未満のログをコンソールから除外する"""
 	def filter(self, record: logging.LogRecord) -> bool:
-		if record.name.startswith("discord") and record.levelno < logging.WARNING:
-			return False
-		return True
+		return not (record.name.startswith("discord") and record.levelno < logging.WARNING)
 
 def setup_daily_logger() -> None:
 	"""
@@ -79,15 +70,15 @@ def setup_daily_logger() -> None:
 	root.addHandler(file_handler)
 	root.addHandler(console_handler)
 
-def get_bot_logger(name: str = BOT_LOGGER_NAME) -> logging.Logger:
+def get_bot_logger() -> logging.Logger:
 	"""Bot専用のロガーインスタンスを取得する"""
-	return logging.getLogger(name)
+	return logging.getLogger(BOT_LOGGER_NAME)
 
 # ==========================================
 # パフォーマンス計測 (config の debug が True のときのみ出力)
 # ==========================================
 def perf(label: str, start: float) -> None:
 	"""start (time.perf_counter() の値) からの経過時間を "[PERF] ラベル: NNms" 形式で DEBUG 出力する"""
-	logger = logging.getLogger(BOT_LOGGER_NAME)
+	logger = get_bot_logger()
 	if logger.isEnabledFor(logging.DEBUG):
 		logger.debug(f"[PERF] {label}: {(time.perf_counter() - start) * 1000:.1f}ms")

@@ -4,12 +4,12 @@ import hashlib
 import json
 import os
 import platform
-import random
 import sys
 import time
 from collections.abc import Coroutine
 from typing import Any
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -21,20 +21,21 @@ from module.embed import (
 	help_pages, invalid_argument_embed, invalid_clear_range_embed, invalid_queue_index_embed, leave_embed,
 	loop_switch_embed, move_success_embed, not_connect_bot_embed, not_playing_embed, pause_embed,
 	permission_error_embed, play_now_embed, purge_complete_embed, queue_list_pages, replay_embed, resume_embed,
-	shuffle_complete_embed,
-	skip_music_embed, speed_set_embed, user_not_here_embed, volume_set_embed,
+	shuffle_complete_embed, skip_music_embed, speed_set_embed, user_not_here_embed, volume_set_embed,
 )
 from module.daily_restart import RESTART_EXIT_CODE, is_supervised, wait_for_restart
 from module.errors import report_error
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
-	SPEED_MAX, SPEED_MIN, MusicVoiceClient, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player, is_in_use,
-	mark_rtp_idle, monitor_loop_lag, play_music, play_now, purge_saved_meta, requeue_track, server_music_data, shutdown_process_pool, spawn,
-	update_alone_timer, warmup_process_pool,
+	MusicVoiceClient, apply_audio_settings, discard_player, get_player, is_active, is_in_use, leave_voice,
+	monitor_loop_lag, pause, play_music, play_now, purge_saved_meta, remove_tracks, replay, resume, server_music_data,
+	shuffle_queue, shutdown_process_pool, spawn, update_alone_timer, warmup_process_pool,
 )
-from module.options import BASE_DIR, app_config
+from module.options import (
+	BASE_DIR, CONFIG_LOAD_ERROR, SPEED_MAX, SPEED_MIN, VOLUME_PERCENT_MAX, VOLUME_PERCENT_MIN, app_config,
+)
 from module.priority import Priority, set_priority
-from module.setting import NotBotAdmin, setup_setting_commands
+from module.setting import setup_setting_commands
 from module.sqlite import close_db, init_db, save_guild_setting
 
 logger = get_bot_logger()
@@ -45,18 +46,17 @@ PAGINATOR_TIMEOUT = 120
 PAGINATOR_JUMP_MIN_PAGES = 3
 # /purge の最大削除件数
 PURGE_MAX = 50
-# /vol で指定できる音量(%)の範囲
-VOLUME_MIN, VOLUME_MAX = 1, 200
 # スラッシュコマンドを最後に同期したときの定義のハッシュを保存するファイル
 COMMAND_HASH_FILE = BASE_DIR / "command_sync.hash"
+# 起動時の通信の失敗 (ログインできない等) から、start.ps1 に起動し直させるまでに待つ秒数
+STARTUP_RETRY_DELAY = 30
+# 起動時に一時的な通信の失敗とみなす例外 (トークンの誤り・インテント未設定は起動し直しても直らないため含めない)
+_STARTUP_NETWORK_ERRORS = (OSError, TimeoutError, aiohttp.ClientError, discord.HTTPException, discord.GatewayNotFound)
 
 
 def log_runtime_info() -> None:
-	"""Python のバージョンと GIL の状態をログに残す (フリースレッド版でも、非対応の拡張モジュールを読み込むと GIL は有効に戻る)"""
-	gil = "不明"
-	# sys._is_gil_enabled は 3.13 以降にのみ存在する
-	if (is_gil_enabled := getattr(sys, "_is_gil_enabled", None)) is not None:
-		gil = "有効" if is_gil_enabled() else "無効 (フリースレッド動作)"
+	"""Python・discord.py のバージョンと GIL の状態をログに残す (フリースレッド版でも、非対応の拡張モジュールを読み込むと GIL は有効に戻る)"""
+	gil = "有効" if sys._is_gil_enabled() else "無効 (フリースレッド動作)"
 	logger.info(f"Python {platform.python_version()} ({platform.python_implementation()}) / GIL: {gil} / discord.py {discord.__version__}")
 
 # ==========================================
@@ -79,7 +79,7 @@ class SatouSioBot(commands.Bot):
 		self.restart_requested = False
 
 	async def setup_hook(self) -> None:
-		"""起動時の非同期セットアップ: 実行環境の記録 → DB初期化 → 抽出ワーカー準備・期限切れの曲情報の削除(並行) → 設定コマンド登録 → スラッシュコマンド同期"""
+		"""起動時の非同期初期化 (DB・抽出ワーカー・期限切れの保存の削除・定期再起動・コマンドの登録と同期)。同期はログインと並行して行う"""
 		log_runtime_info()
 		await init_db()
 		spawn(warmup_process_pool(), name="warmup_process_pool")
@@ -87,9 +87,7 @@ class SatouSioBot(commands.Bot):
 		spawn(monitor_loop_lag(), name="loop_lag_monitor")
 		self._start_daily_restart()
 		setup_setting_commands(self)
-		registered = await self._sync_commands()
-		if help_command := discord.utils.get(registered, name="help"):
-			self.help_mention = help_command.mention
+		spawn(self._sync_commands(), name="sync_commands")
 
 	def _start_daily_restart(self) -> None:
 		"""config の daily_restart が有効で、start.ps1 から起動されていれば定期再起動の待ち合わせを始める"""
@@ -113,34 +111,39 @@ class SatouSioBot(commands.Bot):
 		data = json.dumps({"application_id": self.application_id, "commands": commands_payload}, sort_keys=True, ensure_ascii=False)
 		return hashlib.sha256(data.encode("utf-8")).hexdigest()
 
-	async def _sync_commands(self) -> list[app_commands.AppCommand]:
+	async def _sync_commands(self) -> None:
 		"""
-		スラッシュコマンドの定義が前回の同期から変わっていれば同期し、登録済みのコマンド一覧を返す。
-		- 変わっていなければ同期せず、登録済みの一覧を取得するだけにする (毎回の同期は起動を遅くし、回数制限にかかりうるため)
-		- 登録済みのコマンド名がローカルと食い違えば (Discord 側で消された等)、または一覧を取得できなければ、定義が同じでも同期し直す
-		- ハッシュの保存に失敗しても起動は続ける (次回の起動で同期し直すだけ)
+		スラッシュコマンドの定義が前回の同期から変わったとき (または登録済みのコマンド名が食い違うとき) だけ同期し、
+		登録済みの /help のメンションを help_mention に保存する。失敗しても起動は続ける (次回の起動で同期し直す)
 		"""
 		signature = self._command_signature()
 		try:
 			previous = COMMAND_HASH_FILE.read_text(encoding="utf-8").strip()
 		except OSError:
 			previous = None
+		registered: list[app_commands.AppCommand] | None = None
 		if previous == signature:
 			try:
 				registered = await self.tree.fetch_commands()
 			except discord.HTTPException as e:
 				logger.warning(f"登録済みのスラッシュコマンドを取得できなかったため同期します: {e}")
+			if registered is not None and {command.name for command in registered} != {command.name for command in self.tree.get_commands()}:
 				registered = None
-			if registered is not None and {command.name for command in registered} == {command.name for command in self.tree.get_commands()}:
-				logger.debug("スラッシュコマンドに変更が無いため同期を省略しました。")
-				return registered
-		synced = await self.tree.sync()
-		try:
-			COMMAND_HASH_FILE.write_text(signature, encoding="utf-8")
-		except OSError as e:
-			logger.warning(f"スラッシュコマンドの同期記録を保存できませんでした: {e}")
-		logger.debug("スラッシュコマンドを同期しました。")
-		return synced
+		if registered is None:
+			try:
+				registered = await self.tree.sync()
+			except discord.HTTPException as e:
+				logger.warning(f"スラッシュコマンドを同期できませんでした: {e}")
+				return
+			try:
+				COMMAND_HASH_FILE.write_text(signature, encoding="utf-8")
+			except OSError as e:
+				logger.warning(f"スラッシュコマンドの同期記録を保存できませんでした: {e}")
+			logger.debug("スラッシュコマンドを同期しました。")
+		else:
+			logger.debug("スラッシュコマンドに変更が無いため同期を省略しました。")
+		if help_command := discord.utils.get(registered, name="help"):
+			self.help_mention = help_command.mention
 
 	async def close(self) -> None:
 		"""終了時にプレイヤー・DB接続・プロセスプールを解放する"""
@@ -149,7 +152,7 @@ class SatouSioBot(commands.Bot):
 			for guild_id in list(server_music_data):
 				discard_player(guild_id)
 			await close_db()
-			shutdown_process_pool()
+			await asyncio.to_thread(shutdown_process_pool)
 		finally:
 			await super().close()
 		logger.info("リソースを解放しました。")
@@ -160,12 +163,7 @@ bot = SatouSioBot()
 # ページネーション UI
 # ==========================================
 class SimplePaginator(discord.ui.View):
-	"""
-	複数のEmbedをページ送りで表示するUI。
-	- PAGINATOR_JUMP_MIN_PAGES 未満の場合は「最初へ」「最後へ」ボタンを非表示にする
-	- 先頭ページでは「最初へ」「前へ」、最終ページでは「次へ」「最後へ」を無効にする
-	- タイムアウト後はすべてのボタンを無効化する (message を外から設定しておくこと)
-	"""
+	"""複数の Embed をページ送りで表示する UI (タイムアウト後はボタンを無効化する。message は外から設定する)"""
 	def __init__(self, embeds: list[discord.Embed]) -> None:
 		super().__init__(timeout=PAGINATOR_TIMEOUT)
 		self.embeds = embeds
@@ -236,20 +234,20 @@ async def on_ready() -> None:
 async def on_message(message: discord.Message) -> None:
 	if message.author.bot:
 		return
-	if bot.user in message.mentions:
-		await help_mention_embed(message, bot.help_mention)
 	await bot.process_commands(message)
+	# 本文でメンションされたときだけ案内する (Bot の発言への返信は mentions に含まれるため raw_mentions で見る)
+	if bot.user.id in message.raw_mentions:
+		await help_mention_embed(message, bot.help_mention)
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
 	"""
 	VC の状態変化を処理する。
-	- Bot 自身が切断された: リソースをクリーンアップする (通信断で再接続を待っている間は除く)
+	- Bot 自身が切断された: リソースをクリーンアップする (新しい接続の途中・通信断で再接続を待っている間は除く)
 	- 人の出入り・移動、Bot 自身の移動: 聴者不在による自動退出タイマーを更新する
 	"""
 	guild = member.guild
 	if member.id == bot.user.id:
-		# 切断直後に新しい接続が始まっている場合 (/p による再接続) は、新しいプレイヤーを破棄しない
 		player = server_music_data.get(guild.id)
 		if guild.voice_client is None and before.channel is not None and after.channel is None and player is not None and player.lost_channel is None:
 			discard_player(guild.id)
@@ -268,33 +266,34 @@ def _describe_input_error(error: Exception) -> str:
 		return f"引数 `{error.param.name}` を指定してください。"
 	if isinstance(error, commands.BadArgument):
 		return "引数の形式が正しくありません。"
-	return "コマンドの使い方は /help を確認してください。"
+	return f"コマンドの使い方は {bot.help_mention} を確認してください。"
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError) -> None:
-	"""全コマンド共通のエラーハンドラ。利用者起因のエラーは案内を表示し、想定外のエラーはログに記録する"""
+	"""全コマンド共通のエラーハンドラ。利用者起因のエラーは案内を表示し、それ以外はログに記録して知らせる"""
 	# スラッシュ実行時は HybridCommandError に包まれて届く
 	if isinstance(error, commands.HybridCommandError):
 		error = error.original
 	if isinstance(error, commands.CommandNotFound):
 		return
-	if isinstance(error, (commands.MissingPermissions, NotBotAdmin)):
-		await permission_error_embed(ctx)
-	elif isinstance(error, commands.NoPrivateMessage):
+	if isinstance(error, commands.NoPrivateMessage):
 		await guild_only_embed(ctx)
+	elif isinstance(error, commands.CheckFailure):
+		# MissingPermissions・NotBotAdmin などの権限のチェック
+		await permission_error_embed(ctx)
 	elif isinstance(error, (commands.UserInputError, app_commands.TransformerError)):
 		await invalid_argument_embed(ctx, _describe_input_error(error))
-	elif isinstance(error, (commands.CommandInvokeError, app_commands.CommandInvokeError)):
-		name = ctx.command.qualified_name if ctx.command else "unknown"
-		report_error(f"{name} コマンド実行エラー", error.original)
-		await exception_embed(ctx, name, error.original)
 	else:
-		logger.error(f"コマンドエラー: {error!r}")
+		name = ctx.command.qualified_name if ctx.command else "unknown"
+		original = getattr(error, "original", error)
+		report_error(f"{name} コマンド実行エラー", original)
+		await exception_embed(ctx, name, original)
 
 # ==========================================
 # スラッシュコマンド群
+# 数 ms で応答できるコマンドは defer しない (defer + 送信の 2 往復を 1 往復にする)
 # ==========================================
-async def _timed(label: str, coro: Coroutine[Any, Any, Any]) -> Any:
+async def _timed[T](label: str, coro: Coroutine[Any, Any, T]) -> T:
 	"""coro を実行し、所要時間を perf ログに出す"""
 	t = time.perf_counter()
 	result = await coro
@@ -310,9 +309,13 @@ async def _connect_voice(channel: discord.VoiceChannel | discord.StageChannel) -
 			return channel.guild.voice_client
 		raise
 
+def _connected_vc(ctx: commands.Context) -> discord.VoiceClient | None:
+	"""Bot が接続済みの VC を返す (未接続・接続途中なら None)"""
+	vc = ctx.guild.voice_client
+	return vc if vc is not None and vc.is_connected() else None
+
 @bot.hybrid_command(name="help", description="コマンドやコマンドの使い方を表示します。")
 async def bot_help(ctx: commands.Context) -> None:
-	await ctx.defer(ephemeral=True)
 	await send_pages(ctx, help_pages(), ephemeral=True)
 
 @bot.hybrid_command(name="p", description="曲を再生します（YouTube/ニコニコ/SoundCloudなど対応）")
@@ -334,10 +337,10 @@ async def bot_play(ctx: commands.Context, *, query: str) -> None:
 		voice_task = spawn(_timed("VC移動", vc.move_to(voice.channel)), name="vc_move")
 	await play_music(ctx, query, defer_task=defer_task, voice_task=voice_task, t_request=t_request)
 
-@bot.hybrid_command(name="vol", description=f"音量を設定します({VOLUME_MIN}~{VOLUME_MAX})。")
+@bot.hybrid_command(name="vol", description=f"音量を設定します({VOLUME_PERCENT_MIN}~{VOLUME_PERCENT_MAX})。")
 @app_commands.describe(volume="音量を入力してください。")
 @commands.guild_only()
-async def bot_volume(ctx: commands.Context, volume: commands.Range[int, VOLUME_MIN, VOLUME_MAX]) -> None:
+async def bot_volume(ctx: commands.Context, volume: commands.Range[int, VOLUME_PERCENT_MIN, VOLUME_PERCENT_MAX]) -> None:
 	await ctx.defer()
 	await save_guild_setting(ctx.guild.id, "volume", volume / 100)
 	# 再生中なら現在の曲にも反映する (再生していなければ次の曲から反映される)
@@ -350,8 +353,7 @@ async def bot_volume(ctx: commands.Context, volume: commands.Range[int, VOLUME_M
 @app_commands.rename(rate="倍率", keep_pitch="ピッチ維持")
 @commands.guild_only()
 async def bot_speed(ctx: commands.Context, rate: commands.Range[float, SPEED_MIN, SPEED_MAX], keep_pitch: bool = True) -> None:
-	vc = ctx.guild.voice_client
-	if not vc or not vc.is_connected():
+	if _connected_vc(ctx) is None:
 		return await not_connect_bot_embed(ctx)
 	await ctx.defer()
 	# VC 接続中のプレイヤーに保持し、退出・切断・再生終了でプレイヤーごと破棄させる (移動では維持される)
@@ -364,7 +366,9 @@ async def bot_speed(ctx: commands.Context, rate: commands.Range[float, SPEED_MIN
 @bot.hybrid_command(name="loop", description="現在入っているキューをループ再生します。もう一度実行するとループ解除します。")
 @commands.guild_only()
 async def bot_loop(ctx: commands.Context) -> None:
-	await ctx.defer()
+	# 未接続でプレイヤーを作ると、破棄されずに次の /p まで設定が残るため接続中に限る
+	if _connected_vc(ctx) is None:
+		return await not_connect_bot_embed(ctx)
 	player = get_player(ctx.guild.id)
 	player.loop = not player.loop
 	await loop_switch_embed(ctx, "有効" if player.loop else "無効")
@@ -372,25 +376,21 @@ async def bot_loop(ctx: commands.Context) -> None:
 @bot.hybrid_command(name="sh", description="キューの中身をシャッフルします。")
 @commands.guild_only()
 async def bot_shuffle(ctx: commands.Context) -> None:
-	await ctx.defer()
 	player = server_music_data.get(ctx.guild.id)
 	if not player or not player.queue:
 		return await empty_queue_embed(ctx)
-	random.shuffle(player.queue)
-	player.prefetch()
+	shuffle_queue(player)
 	await shuffle_complete_embed(ctx)
 
 @bot.hybrid_command(name="skip", description="現在の曲をスキップします。")
 @commands.guild_only()
 async def bot_skip(ctx: commands.Context) -> None:
-	await ctx.defer()
 	vc = ctx.guild.voice_client
-	if vc and (vc.is_playing() or vc.is_paused()):
-		# 停止すると再生終了コールバック経由で次の曲へ進む
-		vc.stop()
-		await skip_music_embed(ctx)
-	else:
-		await not_playing_embed(ctx)
+	if not is_active(vc):
+		return await not_playing_embed(ctx)
+	# 停止すると再生終了コールバック経由で次の曲へ進む
+	vc.stop()
+	await skip_music_embed(ctx)
 
 @bot.hybrid_command(name="move", description="Botを自分のいるボイスチャンネルに移動させます。")
 @commands.guild_only()
@@ -418,15 +418,13 @@ async def bot_leave(ctx: commands.Context) -> None:
 			return await leave_embed(ctx)
 		return await not_connect_bot_embed(ctx)
 	await ctx.defer()
-	# 先にプレイヤーを破棄し、停止で発火する次曲処理が動かないようにする
-	discard_player(ctx.guild.id)
-	vc.stop()
-	await vc.disconnect()
+	await leave_voice(ctx.guild, vc)
 	await leave_embed(ctx)
 
 @bot.hybrid_command(name="purge", description="チャンネルのメッセージを一括削除します。")
 @app_commands.describe(limit=f"削除する件数を指定(1~{PURGE_MAX}件)。未指定時は{PURGE_MAX}件。")
 @app_commands.rename(limit="件数")
+@app_commands.default_permissions(manage_messages=True)
 @commands.guild_only()
 @commands.has_permissions(manage_messages=True)
 async def bot_purge(ctx: commands.Context, limit: commands.Range[int, 1, PURGE_MAX] = PURGE_MAX) -> None:
@@ -437,7 +435,6 @@ async def bot_purge(ctx: commands.Context, limit: commands.Range[int, 1, PURGE_M
 @bot.hybrid_command(name="qlist", description="現在のキューに入っている曲のリストを表示します。")
 @commands.guild_only()
 async def bot_qlist(ctx: commands.Context) -> None:
-	await ctx.defer()
 	player = server_music_data.get(ctx.guild.id)
 	if not player or not player.queue:
 		return await empty_queue_embed(ctx)
@@ -446,36 +443,27 @@ async def bot_qlist(ctx: commands.Context) -> None:
 @bot.hybrid_command(name="pause", description="現在再生中の曲を一時停止します。")
 @commands.guild_only()
 async def bot_pause(ctx: commands.Context) -> None:
-	await ctx.defer()
-	vc = ctx.guild.voice_client
-	if not vc or not vc.is_connected():
+	vc = _connected_vc(ctx)
+	if vc is None:
 		return await not_connect_bot_embed(ctx)
 	if vc.is_paused():
 		return await already_paused_embed(ctx)
 	if not vc.is_playing():
 		return await not_playing_embed(ctx)
-	vc.pause()
-	mark_rtp_idle(ctx.guild.id)
-	# 準備済みの次の曲は、一時停止が長引くと URL の期限が切れうるため捨てる (再開後、終わり際なら準備し直される)
-	if player := server_music_data.get(ctx.guild.id):
-		player.discard_preload()
+	pause(vc)
 	await pause_embed(ctx)
 
 @bot.hybrid_command(name="resume", description="一時停止中の曲を再開します。")
 @commands.guild_only()
 async def bot_resume(ctx: commands.Context) -> None:
-	await ctx.defer()
-	vc = ctx.guild.voice_client
-	if not vc or not vc.is_connected():
+	vc = _connected_vc(ctx)
+	if vc is None:
 		return await not_connect_bot_embed(ctx)
 	if vc.is_playing():
 		return await already_playing_embed(ctx)
 	if not vc.is_paused():
 		return await not_playing_embed(ctx)
-	if isinstance(vc.source, YTDLSource):
-		vc.source.reset_timing()
-	await advance_rtp_timestamp(vc)
-	vc.resume()
+	await resume(vc)
 	await resume_embed(ctx)
 
 @bot.hybrid_command(name="clear", description="キューに入っている曲を削除します。")
@@ -483,12 +471,10 @@ async def bot_resume(ctx: commands.Context) -> None:
 @app_commands.rename(start="件数または開始番号", end="終了番号")
 @commands.guild_only()
 async def bot_clear(ctx: commands.Context, start: int | None = None, end: int | None = None) -> None:
-	await ctx.defer()
 	player = server_music_data.get(ctx.guild.id)
 	if not player or not player.queue:
 		return await empty_queue_embed(ctx)
-	tracks = list(player.queue)
-	q_len = len(tracks)
+	q_len = len(player.queue)
 	if start is None and end is None:
 		# 引数なし: 全削除
 		begin, stop = 0, q_len
@@ -496,36 +482,24 @@ async def bot_clear(ctx: commands.Context, start: int | None = None, end: int | 
 		# 引数1つ: 先頭から start 件削除
 		if start < 1:
 			return await invalid_clear_range_embed(ctx)
-		begin, stop = 0, min(start, q_len)
+		begin, stop = 0, start
 	else:
 		# 引数2つ: start〜end の範囲を削除 (1-indexed)
 		if start is None or start < 1 or end < start or start > q_len:
 			return await invalid_clear_range_embed(ctx)
-		begin, stop = start - 1, min(end, q_len)
-	removed = tracks[begin:stop]
-	del tracks[begin:stop]
-	for track in removed:
-		if (task := track["fetch_task"]) is not None and not task.done():
-			task.cancel()
-	player.queue.clear()
-	player.queue.extend(tracks)
-	player.prefetch()
-	await clear_queue_embed(ctx, len(removed))
+		begin, stop = start - 1, end
+	await clear_queue_embed(ctx, remove_tracks(player, begin, stop))
 
 @bot.hybrid_command(name="replay", description="現在再生中の曲を最初から再生し直します。")
 @commands.guild_only()
 async def bot_replay(ctx: commands.Context) -> None:
-	await ctx.defer()
-	vc = ctx.guild.voice_client
-	if not vc or not vc.is_connected():
+	vc = _connected_vc(ctx)
+	if vc is None:
 		return await not_connect_bot_embed(ctx)
 	player = server_music_data.get(ctx.guild.id)
-	if not player or not player.current or not (vc.is_playing() or vc.is_paused()):
+	if not player or not player.current or not is_active(vc):
 		return await not_playing_embed(ctx)
-	# 現在の曲をキュー先頭に積み直し、停止して次曲処理に再生させる (ストリームURLは期限内なら使い回す)
-	player.queue.appendleft(requeue_track(player.current))
-	player.current = None
-	vc.stop()
+	replay(player, vc)
 	await replay_embed(ctx)
 
 @bot.hybrid_command(name="pnow", description="キューの指定した曲を今すぐ再生します。再生中の曲は次の曲に回ります。")
@@ -533,12 +507,11 @@ async def bot_replay(ctx: commands.Context) -> None:
 @app_commands.rename(index="番号")
 @commands.guild_only()
 async def bot_play_now(ctx: commands.Context, index: int) -> None:
-	await ctx.defer()
-	vc = ctx.guild.voice_client
-	if not vc or not vc.is_connected():
+	vc = _connected_vc(ctx)
+	if vc is None:
 		return await not_connect_bot_embed(ctx)
 	player = server_music_data.get(ctx.guild.id)
-	if not player or not player.current or not (vc.is_playing() or vc.is_paused()):
+	if not player or not player.current or not is_active(vc):
 		return await not_playing_embed(ctx)
 	if not player.queue:
 		return await empty_queue_embed(ctx)
@@ -575,18 +548,24 @@ def main() -> None:
 	load_dotenv(BASE_DIR / ".env")
 	token = os.getenv("discord_api", "")
 	setup_daily_logger()
+	if CONFIG_LOAD_ERROR:
+		logger.warning(f"config.ini を読み込めなかったため、すべて既定値で起動します: {CONFIG_LOAD_ERROR}")
 	if not token:
 		logger.error(".env に discord_api (Botトークン) が設定されていません。")
 		sys.exit(1)
-	# 音声の送信は本体のプロセスで行うため、再生中の処理として優先度を上げる (抽出ワーカーは通常の優先度で起動される)
+	# 音声を送る本体プロセスの優先度を上げる (抽出ワーカーは通常の優先度で起動される)
 	set_priority(Priority.PLAYBACK)
 	try:
 		_run_with_fast_loop(_run_bot(token))
 	except KeyboardInterrupt:
 		logger.info("Ctrl+C を受け付けたため終了しました。")
 		return
+	except _STARTUP_NETWORK_ERRORS as e:
+		# 定期再起動の直後に通信が途切れていた場合などに、止まったままにならないよう start.ps1 に起動し直させる
+		if not is_supervised():
+			raise
+		logger.error(f"Discord に接続できなかったため、{STARTUP_RETRY_DELAY} 秒後に起動し直します: {e!r}")
+		time.sleep(STARTUP_RETRY_DELAY)
+		sys.exit(RESTART_EXIT_CODE)
 	if bot.restart_requested:
 		sys.exit(RESTART_EXIT_CODE)
-
-if __name__ == "__main__":
-	main()

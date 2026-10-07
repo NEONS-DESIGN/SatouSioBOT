@@ -1,7 +1,7 @@
 ﻿# SatouSioBOT の起動スクリプト。venv の Python を優先し、無ければ Python ランチャーで 3.14 を指定して起動する。
 # 管理者として実行していなければ起動しない。同じフォルダの Bot がこのスクリプトから起動中なら二重に起動しない。
 # start.bat から -NoExit 付きで呼ばれるため、Bot の終了後もウィンドウは残る。
-# Bot が定期再起動のために終了コード $RestartExitCode で終わったときは、同じウィンドウで起動し直す (管理者の権限も引き継がれる)。
+# Bot が終了コード $RestartExitCode で終わったとき (定期再起動・起動時の通信の失敗) は、同じウィンドウで起動し直す (管理者の権限も引き継がれる)。
 
 $PythonVersion = '3.14'
 $EntryPoint = 'main.py'
@@ -92,7 +92,7 @@ try {
 		if ($LASTEXITCODE -ne $RestartExitCode) {
 			break
 		}
-		Write-Host "定期再起動のため Bot を起動し直します..." -ForegroundColor Cyan
+		Write-Host "Bot を起動し直します..." -ForegroundColor Cyan
 		Stop-LeftoverDeno
 		Start-Sleep -Seconds $RestartDelaySeconds
 	}

@@ -19,11 +19,8 @@ class Priority(enum.IntEnum):
 	# それ以降の曲の先読み
 	LATER = 3
 
-# Priority に対応する Windows の優先度クラス (SetPriorityClass の引数)
-# LATER は IDLE にしない。始まった抽出の優先度は後から上げられず、スキップで現在の曲になったときに
-# CPU の空き待ちで止まりうるため。NEXT との順序は先読みを1曲ずつ順に行うことで守る
-# PLAYBACK を REALTIME にしないのは、管理者権限が無いと HIGH に落とされ、権限があってもマウス入力やディスクの書き出しなど
-# OS 自体の処理より優先されて固まりうるため
+# Priority に対応する Windows の優先度クラス (SetPriorityClass の引数)。
+# LATER は後から上げられないため IDLE にしない (NEXT との順序は 1 曲ずつの先読みで守る)。PLAYBACK は OS の処理を妨げないよう REALTIME にしない
 _WINDOWS_PRIORITY_CLASSES = {
 	Priority.PLAYBACK: 0x00000080,  # HIGH_PRIORITY_CLASS
 	Priority.CURRENT: 0x00000020,   # NORMAL_PRIORITY_CLASS

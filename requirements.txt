@@ -1,6 +1,6 @@
-discord.py[voice,speed]
-yt-dlp[default,curl-cffi]
-yt-dlp-ejs
+discord.py[voice,speed]>=2.7.1
+# yt-dlp-ejs (YouTube の署名の解読スクリプト) は yt-dlp[default] が対応する版を入れる
+yt-dlp[default,curl-cffi]>=2026.8.19
 aiosqlite
 python-dotenv
 

@@ -9,10 +9,10 @@ from module.options import app_config
 
 logger = get_bot_logger()
 
-# ギルド設定として更新を許可するカラム (SQL へ埋め込むためホワイトリストで制限する)
-_SETTING_COLUMNS = frozenset({"volume", "queue_limit", "playlist_limit", "alone_timeout"})
+# ギルド設定として更新を許可するカラム (SQL へ埋め込むためホワイトリストで制限する)。並びは GuildSettings と同じ
+_SETTING_COLUMNS = ("volume", "queue_limit", "playlist_limit", "alone_timeout")
 
-# 永続コネクションとロック (モジュールレベルのシングルトン)
+# 永続コネクションと、その利用を直列化するロック (モジュールレベルのシングルトン)
 _connection: aiosqlite.Connection | None = None
 _lock = asyncio.Lock()
 # close_db() 後の再接続を禁止するフラグ (終了処理後に接続が開き直されて残るのを防ぐ)
@@ -34,7 +34,7 @@ def _default_settings() -> GuildSettings:
 	)
 
 async def _get_connection() -> aiosqlite.Connection:
-	"""永続的なSQLiteコネクションを返す。初回のみ接続して WAL モードを有効化する"""
+	"""永続的なSQLiteコネクションを返す。初回のみ接続して WAL モードを有効化する。_lock を取得してから呼ぶこと"""
 	global _connection
 	if _closed:
 		raise RuntimeError("データベース接続は既に閉じられています。")
@@ -42,34 +42,29 @@ async def _get_connection() -> aiosqlite.Connection:
 		_connection = await aiosqlite.connect(app_config.DATABASE_PATH)
 		await _connection.execute("PRAGMA journal_mode=WAL;")
 		await _connection.execute("PRAGMA synchronous=NORMAL;")  # WAL時の推奨設定
-		await _connection.commit()
 		logger.debug(f"SQLiteに接続しました: {app_config.DATABASE_PATH}")
 	return _connection
 
-async def init_db() -> None:
+# server_data の設定カラムは DEFAULT を持たせない (NULL は読み込み時に config.ini の既定値で補うため、既定値を変えると全ギルドに反映される)
+_CREATE_TABLES = (
 	"""
-	テーブルの作成と既存テーブルへのカラム追加(マイグレーション)を行う。
-	- ALTER TABLE が重複カラムエラーを出した場合は安全に無視する
-	"""
-	defaults = _default_settings()
-	create_server_data = f"""
 	CREATE TABLE IF NOT EXISTS "server_data" (
-		"guild_id"       INTEGER PRIMARY KEY UNIQUE NOT NULL,
-		"volume"         REAL    DEFAULT {defaults.volume},
-		"queue_limit"    INTEGER DEFAULT {defaults.queue_limit},
-		"playlist_limit" INTEGER DEFAULT {defaults.playlist_limit},
-		"alone_timeout"  INTEGER DEFAULT {defaults.alone_timeout}
+		"guild_id"       INTEGER PRIMARY KEY NOT NULL,
+		"volume"         REAL,
+		"queue_limit"    INTEGER,
+		"playlist_limit" INTEGER,
+		"alone_timeout"  INTEGER
 	);
+	""",
 	"""
-	create_bot_admins = """
 	CREATE TABLE IF NOT EXISTS "bot_admins" (
 		"guild_id" INTEGER NOT NULL,
 		"user_id"  INTEGER NOT NULL,
 		PRIMARY KEY ("guild_id", "user_id")
 	);
-	"""
+	""",
 	# 曲のメタ情報。url は抽出結果の曲の URL (曲名検索・再生リストの保存から参照する)
-	create_track_meta = """
+	"""
 	CREATE TABLE IF NOT EXISTS "track_meta" (
 		"url"        TEXT    PRIMARY KEY NOT NULL,
 		"title"      TEXT,
@@ -77,17 +72,17 @@ async def init_db() -> None:
 		"thumbnail"  TEXT,
 		"fetched_at" INTEGER NOT NULL
 	);
-	"""
+	""",
 	# 曲名検索の結果。query は表記ゆれを揃えた検索語
-	create_search_cache = """
+	"""
 	CREATE TABLE IF NOT EXISTS "search_cache" (
 		"query"      TEXT    PRIMARY KEY NOT NULL,
 		"track_url"  TEXT    NOT NULL,
 		"fetched_at" INTEGER NOT NULL
 	);
-	"""
+	""",
 	# 再生リストの結果。track_urls は曲の URL の JSON 配列 (並び順どおり)
-	create_playlist_cache = """
+	"""
 	CREATE TABLE IF NOT EXISTS "playlist_cache" (
 		"url"         TEXT    PRIMARY KEY NOT NULL,
 		"title"       TEXT,
@@ -96,28 +91,24 @@ async def init_db() -> None:
 		"track_urls"  TEXT    NOT NULL,
 		"fetched_at"  INTEGER NOT NULL
 	);
-	"""
-	# 旧スキーマに存在しない可能性があるカラムをマイグレーションで追加する
-	migrate_columns: list[tuple[str, str]] = [
-		("queue_limit",    f'ALTER TABLE "server_data" ADD COLUMN "queue_limit"    INTEGER DEFAULT {defaults.queue_limit};'),
-		("playlist_limit", f'ALTER TABLE "server_data" ADD COLUMN "playlist_limit" INTEGER DEFAULT {defaults.playlist_limit};'),
-		("alone_timeout",  f'ALTER TABLE "server_data" ADD COLUMN "alone_timeout"  INTEGER DEFAULT {defaults.alone_timeout};'),
-	]
+	""",
+)
+# 旧スキーマの server_data に無い可能性があるカラム (マイグレーションで追加する)
+_MIGRATE_COLUMNS = (("queue_limit", "INTEGER"), ("playlist_limit", "INTEGER"), ("alone_timeout", "INTEGER"))
+
+async def init_db() -> None:
+	"""テーブルの作成と、既存テーブルへのカラム追加 (既にあれば無視) を行う"""
 	try:
-		db = await _get_connection()
 		async with _lock:
-			await db.execute(create_server_data)
-			await db.execute(create_bot_admins)
-			await db.execute(create_track_meta)
-			await db.execute(create_search_cache)
-			await db.execute(create_playlist_cache)
-			for col_name, alter_sql in migrate_columns:
+			db = await _get_connection()
+			for create_sql in _CREATE_TABLES:
+				await db.execute(create_sql)
+			for column, column_type in _MIGRATE_COLUMNS:
 				try:
-					await db.execute(alter_sql)
+					await db.execute(f'ALTER TABLE "server_data" ADD COLUMN "{column}" {column_type};')
 				except aiosqlite.OperationalError as e:
-					# duplicate column name は正常なケースなので無視する
 					if "duplicate column name" not in str(e).lower():
-						logger.warning(f"[SQLite] {col_name} カラム追加時の予期せぬエラー: {e}")
+						logger.warning(f"[SQLite] {column} カラム追加時の予期せぬエラー: {e}")
 			await db.commit()
 		logger.debug("[SQLite] データベースの初期化が完了しました。")
 	except Exception as e:
@@ -125,29 +116,26 @@ async def init_db() -> None:
 		raise
 
 async def close_db() -> None:
-	"""永続SQLite接続を閉じ、以後の再接続を禁止する（終了時に呼ぶ）"""
+	"""永続SQLite接続を閉じ、以後の再接続を禁止する (実行中のクエリの完了を待つ。終了時に呼ぶ)"""
 	global _connection, _closed
-	_closed = True
-	if _connection is not None:
-		try:
-			await _connection.close()
-		finally:
-			_connection = None
+	async with _lock:
+		_closed = True
+		connection, _connection = _connection, None
+		if connection is not None:
+			await connection.close()
 			logger.debug("[SQLite] 接続を閉じました。")
 
 async def sql_execution(query: str, params: tuple = ()) -> list:
 	"""
-	SQLクエリを実行し、結果行のリストを返す。
-	- Lockで排他制御して並行書き込みの競合を防ぐ
-	- SELECT 以外のときのみ commit する
+	SQLクエリを実行し、結果行のリストを返す。更新があれば commit する。
 	- 失敗時はロガーにエラーを記録してから例外を送出する
 	"""
 	try:
-		db = await _get_connection()
 		async with _lock:
+			db = await _get_connection()
 			async with db.execute(query, params) as cursor:
 				result = await cursor.fetchall()
-			if not query.lstrip().upper().startswith("SELECT"):
+			if db.in_transaction:
 				await db.commit()
 			return result
 	except Exception as e:
@@ -160,8 +148,8 @@ async def sql_execute_batch(statements: Iterable[tuple[str, tuple]]) -> None:
 	- 失敗時はロガーにエラーを記録してから例外を送出する
 	"""
 	try:
-		db = await _get_connection()
 		async with _lock:
+			db = await _get_connection()
 			try:
 				for query, params in statements:
 					await db.execute(query, params)
@@ -173,37 +161,41 @@ async def sql_execute_batch(statements: Iterable[tuple[str, tuple]]) -> None:
 		logger.error(f"[SQLite] 一括実行エラー: {e}")
 		raise
 
-# ギルド設定のメモリキャッシュ (曲の切り替えのたびに DB を読まないため)。書き込みはこのプロセスの save_guild_setting だけが行う
+# ギルド設定のメモリキャッシュ (書き込みはこのプロセスの save_guild_setting のみ)
 _settings_cache: dict[int, GuildSettings] = {}
 # ギルドごとの設定の更新回数。読み込み中に更新された古い値をキャッシュしないために使う
 _settings_versions: dict[int, int] = {}
 
 async def get_guild_settings(guild_id: int) -> GuildSettings:
-	"""ギルド設定を返す。未登録はデフォルト値、NULL のカラムは個別に補う。取得失敗時はデフォルト値を返す (キャッシュしない)"""
+	"""ギルド設定を返す。未登録・NULL のカラムは config.ini の既定値で補う。取得失敗時はデフォルト値を返す (キャッシュしない)"""
 	if (cached := _settings_cache.get(guild_id)) is not None:
 		return cached
 	defaults = _default_settings()
 	version = _settings_versions.get(guild_id, 0)
 	try:
 		rows = await sql_execution(
-			"SELECT volume, queue_limit, playlist_limit, alone_timeout FROM server_data WHERE guild_id=?;",
+			f"SELECT {', '.join(_SETTING_COLUMNS)} FROM server_data WHERE guild_id=?;",
 			(guild_id,),
 		)
 	except Exception:
 		return defaults
-	settings = GuildSettings(*(value if value is not None else default for value, default in zip(rows[0], defaults))) if rows else defaults
+	settings = GuildSettings(*(value if value is not None else default for value, default in zip(rows[0], defaults, strict=True))) if rows else defaults
 	if _settings_versions.get(guild_id, 0) == version:
 		_settings_cache[guild_id] = settings
 	return settings
 
 async def save_guild_setting(guild_id: int, column: str, value: Any) -> None:
-	"""ギルド設定の1項目を UPSERT し、キャッシュにも反映する。失敗時は例外を送出する"""
+	"""
+	ギルド設定の1項目を UPSERT し、キャッシュにも反映する。失敗時は例外を送出する。
+	- 新しい行の他の項目は NULL (既定値に従う) にする。旧スキーマの DEFAULT が入らないよう明示する
+	"""
 	if column not in _SETTING_COLUMNS:
 		raise ValueError(f"更新できない設定項目です: {column}")
+	values = tuple(value if name == column else None for name in _SETTING_COLUMNS)
 	await sql_execution(
-		f"INSERT INTO server_data (guild_id, {column}) VALUES (?, ?) "
+		f"INSERT INTO server_data (guild_id, {', '.join(_SETTING_COLUMNS)}) VALUES (?{', ?' * len(_SETTING_COLUMNS)}) "
 		f"ON CONFLICT(guild_id) DO UPDATE SET {column}=excluded.{column};",
-		(guild_id, value),
+		(guild_id, *values),
 	)
 	_settings_versions[guild_id] = _settings_versions.get(guild_id, 0) + 1
 	if (cached := _settings_cache.get(guild_id)) is not None:

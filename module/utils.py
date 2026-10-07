@@ -1,3 +1,8 @@
+"""discord に依存しない表示用の小さな関数と定数"""
+
+# タイトルが取得できなかった曲の表示名
+UNKNOWN_TITLE = "Unknown Title"
+
 def format_duration(duration: float | None) -> str:
 	"""秒数を "MM:SS" または "HH:MM:SS" 形式に変換する。0 / None は "00:00" """
 	if not duration:

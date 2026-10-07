@@ -1,17 +1,19 @@
 """
 YouTube の JS チャレンジ (n / sig) を、抽出ワーカーに常駐させた Deno で解く yt-dlp のプロバイダ。
-yt-dlp 標準の Deno プロバイダは解読のたびに Deno を起動し、解読スクリプトと前処理済みプレイヤー (約 4MB) を渡し直すため、
-1 回あたり開発機で約 0.24s かかる。常駐させてプレイヤーを保持すると、2 回目以降は数 ms で済む。
+yt-dlp 標準の Deno プロバイダは解読のたびに Deno を起動し、解読スクリプトと前処理済みプレイヤー (約 4MB) を渡し直す。
+常駐させてプレイヤーを保持すると、2 回目以降は数 ms で済む。
 - 抽出ワーカーの子プロセスでのみ import する (yt-dlp を読み込むため)。import するとプロバイダが登録される
 - 失敗時は JsChallengeProviderError を送出し、yt-dlp が標準の Deno プロバイダで解き直す。Deno は次の解読で起動し直す
 """
 import collections
+import contextlib
 import hashlib
 import json
 import pathlib
 import queue
 import subprocess
 import threading
+import time
 import urllib.parse
 from typing import Any
 
@@ -32,25 +34,26 @@ from yt_dlp.extractor.youtube.jsc.provider import (
 )
 from yt_dlp.utils import Popen
 
+from module.extractor import PLAYER_CACHE_KEY_PREFIX, player_cache_files
 from module.priority import Priority, set_priority
 
 # Deno 側の処理 (このファイルと同じフォルダに置く)
 SERVER_SCRIPT = pathlib.Path(__file__).with_name("resident_jsc.js")
-# 1 回の要求 (起動・プレイヤーの前処理を含む) の応答を待つ上限秒数。超えたら Deno を終了して標準のプロバイダに任せる
+# 応答を待つ上限秒数。超えたら Deno を終了して標準のプロバイダに任せる (スクリプトの評価・プレイヤーの読み込みを含む要求 / 保持済みのプレイヤーで解く要求)
 SOLVE_TIMEOUT_SECONDS = 30
+CACHED_SOLVE_TIMEOUT_SECONDS = 10
 # 強制終了の後、読み込みスレッドが終了を知らせるまで待つ余裕の秒数
 READER_GRACE_SECONDS = 5
-# 通信の失敗がこの回数続いたら、そのワーカーでは常駐 Deno を使わない (以後は標準の Deno プロバイダで解く)
+# 通信の失敗がこの回数続いたら、最後の失敗から FAILURE_RESET_SECONDS の間は常駐 Deno を使わない (標準の Deno プロバイダで解く)
 MAX_CONSECUTIVE_FAILURES = 3
+FAILURE_RESET_SECONDS = 600
 # エラーの説明に添える Deno の標準エラーの行数と文字数
 STDERR_TAIL_LINES = 20
 STDERR_MESSAGE_LIMIT = 500
 # 標準の Deno プロバイダ (優先度 1000。継承しているためこのプロバイダにも加算される) より先に使わせるための加点
 PREFERENCE_BONUS = 1000
-# yt-dlp のキャッシュで前処理済みプレイヤーを保存するキーの接頭辞 (キーは "player:<プレイヤーの URL>")
-_PLAYER_CACHE_KEY_PREFIX = "player:"
-# 常駐 Deno の起動オプション。プロンプト・外部取得・設定ファイル・npm を使わない (標準の Deno プロバイダの npm 無し版と同じ方針)
-# --optimize-for-size は常駐中のメモリを約 83MB → 約 52MB に抑える (解読の速さは変わらない。明示的な GC は遅くなり効果も小さい)
+# 常駐 Deno の起動オプション。プロンプト・外部取得・設定ファイル・npm を使わない (標準の Deno プロバイダの npm 無し版と同じ方針)。
+# --optimize-for-size は常駐中のメモリを抑える (解読の速さは変わらない)
 _DENO_OPTIONS = (
 	"--no-prompt", "--no-remote", "--no-lock", "--node-modules-dir=none", "--no-config", "--no-npm", "--cached-only",
 	"--v8-flags=--optimize-for-size",
@@ -65,7 +68,7 @@ class _ResidentDeno:
 	- 最初の要求で起動し、解読スクリプトを評価させる (スクリプトが変われば起動し直す)
 	- 1 プロセスで扱うプレイヤーは 1 版だけにする (プレイヤーのコードが書き換えたグローバルな状態を別の版に持ち込まないため)
 	- 標準出力・標準エラーはそれぞれ専用スレッドが読む。標準出力の終了 (EOF) は None で知らせ、標準エラーは末尾だけ残す
-	- 通信の失敗が MAX_CONSECUTIVE_FAILURES 回続いたら、このワーカーでは使わない (毎回タイムアウトまで待たせないため)
+	- 通信の失敗が MAX_CONSECUTIVE_FAILURES 回続いたら、しばらく使わない (毎回タイムアウトまで待たせないため)
 	"""
 	def __init__(self) -> None:
 		self._lock = threading.Lock()
@@ -75,6 +78,7 @@ class _ResidentDeno:
 		self._script_hash: str | None = None
 		self._has_player = False
 		self._failures = 0
+		self._last_failure = 0.0
 
 	@property
 	def pid(self) -> int | None:
@@ -84,7 +88,9 @@ class _ResidentDeno:
 
 	@property
 	def available(self) -> bool:
-		"""通信の失敗が続いていなければ True"""
+		"""通信の失敗が続いていない、または最後の失敗から FAILURE_RESET_SECONDS たっていれば True"""
+		if self._failures >= MAX_CONSECUTIVE_FAILURES and time.monotonic() - self._last_failure >= FAILURE_RESET_SECONDS:
+			self._failures = 0
 		return self._failures < MAX_CONSECUTIVE_FAILURES
 
 	def request(
@@ -102,16 +108,18 @@ class _ResidentDeno:
 				if self.pid is None or self._script_hash != script_hash or (new_player and self._has_player):
 					self._start(command, env)
 					try:
-						self._exchange({"type": "init", "code": script}, ("ok",))
+						self._exchange({"type": "init", "code": script}, ("ok",), SOLVE_TIMEOUT_SECONDS)
 					except _SolverError as e:
 						# 評価できないスクリプトは何度送っても同じため、通信の失敗と同じく数えて止める
 						raise self._failure(str(e)) from e
 					self._script_hash = script_hash
-				response = self._exchange(message, ("result", "missing"))
+				timeout = SOLVE_TIMEOUT_SECONDS if new_player else CACHED_SOLVE_TIMEOUT_SECONDS
+				response = self._exchange(message, ("result", "missing"), timeout)
 			except _SolverError:
 				raise
 			except JsChallengeProviderError:
 				self._failures += 1
+				self._last_failure = time.monotonic()
 				self._stop()
 				raise
 			self._failures = 0
@@ -158,10 +166,10 @@ class _ResidentDeno:
 			reason = f"{reason} (stderr: {stderr[-STDERR_MESSAGE_LIMIT:]})"
 		return JsChallengeProviderError(reason)
 
-	def _exchange(self, message: dict[str, Any], expected: tuple[str, ...]) -> dict[str, Any]:
+	def _exchange(self, message: dict[str, Any], expected: tuple[str, ...], timeout: float) -> dict[str, Any]:
 		"""
 		1 件送って応答を 1 件受け取る。応答の type が expected のどれでもなければ通信の失敗として扱う (要求と応答の対応がずれるのを防ぐ)。
-		SOLVE_TIMEOUT_SECONDS を超えたら Deno を強制終了して失敗にする
+		timeout 秒を超えたら Deno を強制終了して失敗にする
 		"""
 		process, lines = self._process, self._lines
 		timed_out = threading.Event()
@@ -169,16 +177,16 @@ class _ResidentDeno:
 			timed_out.set()
 			process.kill()
 		# 書き込み (4MB のプレイヤーはパイプの容量を超える) と読み込みのどちらで止まっても、強制終了で抜けられる
-		watchdog = threading.Timer(SOLVE_TIMEOUT_SECONDS, kill_on_timeout)
+		watchdog = threading.Timer(timeout, kill_on_timeout)
 		watchdog.daemon = True
 		watchdog.start()
 		try:
 			process.stdin.write(json.dumps(message).encode() + b"\n")
 			process.stdin.flush()
-			line = lines.get(timeout=SOLVE_TIMEOUT_SECONDS + READER_GRACE_SECONDS)
+			line = lines.get(timeout=timeout + READER_GRACE_SECONDS)
 		except (OSError, ValueError) as e:
 			if timed_out.is_set():
-				raise self._failure(f"常駐 Deno が {SOLVE_TIMEOUT_SECONDS} 秒以内に応答しませんでした") from e
+				raise self._failure(f"常駐 Deno が {timeout:g} 秒以内に応答しませんでした") from e
 			raise self._failure(f"常駐 Deno への送信に失敗しました: {e}") from e
 		except queue.Empty as e:
 			raise self._failure("常駐 Deno の出力を読めなくなりました") from e
@@ -186,7 +194,7 @@ class _ResidentDeno:
 			watchdog.cancel()
 		if line is None:
 			if timed_out.is_set():
-				raise self._failure(f"常駐 Deno が {SOLVE_TIMEOUT_SECONDS} 秒以内に応答しませんでした")
+				raise self._failure(f"常駐 Deno が {timeout:g} 秒以内に応答しませんでした")
 			try:
 				returncode = process.wait(timeout=READER_GRACE_SECONDS)
 			except subprocess.TimeoutExpired:
@@ -214,6 +222,9 @@ class _ResidentDeno:
 			process.wait(timeout=SOLVE_TIMEOUT_SECONDS)
 		except (OSError, subprocess.TimeoutExpired):
 			pass
+		for pipe in (process.stdin, process.stdout, process.stderr):
+			with contextlib.suppress(OSError):
+				pipe.close()
 
 _server = _ResidentDeno()
 
@@ -247,7 +258,7 @@ class ResidentDenoJCP(DenoJCP):
 			responses = output.get("responses")
 			if not isinstance(responses, list) or len(responses) != len(grouped_requests):
 				raise JsChallengeProviderError(f"常駐 Deno の応答の件数が要求と一致しません: {str(output)[:200]}")
-			for request, response_data in zip(grouped_requests, responses):
+			for request, response_data in zip(grouped_requests, responses, strict=True):
 				data = response_data.get("data") if isinstance(response_data, dict) else None
 				if not isinstance(data, dict) or response_data.get("type") != "result":
 					error = response_data.get("error") if isinstance(response_data, dict) else response_data
@@ -270,7 +281,7 @@ class ResidentDenoJCP(DenoJCP):
 		output = self._request(message)
 		if output["type"] != "missing":
 			return output
-		cache_key = f"{_PLAYER_CACHE_KEY_PREFIX}{player_url}"
+		cache_key = f"{PLAYER_CACHE_KEY_PREFIX}{player_url}"
 		if self._ENABLE_PREPROCESSED_PLAYER_CACHE and (preprocessed := self.ie.cache.load(self._CACHE_SECTION, cache_key)):
 			return self._request({**message, "preprocessed_player": preprocessed}, new_player=True)
 		video_id = next((request.video_id for request in requests), None)
@@ -292,16 +303,11 @@ class ResidentDenoJCP(DenoJCP):
 
 def _latest_cached_player_url(ydl: Any) -> str | None:
 	"""yt-dlp のキャッシュにある前処理済みプレイヤーのうち、最も新しいもののプレイヤー URL を返す (無ければ None)"""
-	cache_dir = pathlib.Path(ydl.cache._get_root_dir()) / ResidentDenoJCP._CACHE_SECTION
-	# yt-dlp はキーを URL エンコードし、% を , に置き換えたファイル名で保存する
-	prefix = urllib.parse.quote(_PLAYER_CACHE_KEY_PREFIX, safe="").replace("%", ",")
-	try:
-		latest = max(cache_dir.glob(f"{prefix}*.json"), key=lambda path: path.stat().st_mtime, default=None)
-	except OSError:
+	files = player_cache_files(ydl)
+	if not files:
 		return None
-	if latest is None:
-		return None
-	return urllib.parse.unquote(latest.stem.replace(",", "%"))[len(_PLAYER_CACHE_KEY_PREFIX):]
+	# ファイル名は、キーを URL エンコードして % を , に置き換えたもの
+	return urllib.parse.unquote(files[0].stem.replace(",", "%"))[len(PLAYER_CACHE_KEY_PREFIX):]
 
 def warm_up(ydl: Any) -> bool:
 	"""

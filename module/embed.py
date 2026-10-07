@@ -5,18 +5,18 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from module.color import Embed as EmbedColor
 from module.errors import ErrorCause, describe_error
 from module.logger import get_bot_logger
-from module.utils import format_duration
+from module.options import ALONE_TIMEOUT_MAX, MAX_LIMIT, SPEED_MAX, SPEED_MIN, VOLUME_PERCENT_MAX, VOLUME_PERCENT_MIN
+from module.utils import UNKNOWN_TITLE, format_duration
 
 logger = get_bot_logger()
 
-# カラー定数
-_RED    = EmbedColor.RED
-_GREEN  = EmbedColor.GREEN
-_BLUE   = EmbedColor.BLUE
-_YELLOW = EmbedColor.YELLOW
+# Embed の色
+_RED    = 0xFF4686
+_GREEN  = 0x00976B
+_BLUE   = 0x1F64E1
+_YELLOW = 0xF1C40F
 
 # 再生中サムネイルのフォールバック画像URL
 _FALLBACK_THUMBNAIL = "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?q=80&w=1024&auto=format&fit=crop"
@@ -33,8 +33,8 @@ _QUEUE_TITLE_LIMIT = 45
 _RAW_ERROR_LIMIT = 1500
 # Bot 側の問題によるエラーで、利用者向けの説明に添える一文
 _SERVER_ERROR_NOTE = "Bot 側の問題のため、時間をおいても直らない場合は Bot の管理者にお知らせください。"
-# 音源の準備中メッセージ。表示から PREPARING_SLOW_SECONDS 秒たっても準備が終わらなければ、待たせていることを詫びる文言に書き換える
-PREPARING_SLOW_SECONDS = 20
+# 音源の準備中メッセージと、お詫びの文言に書き換えるまでの秒数
+_PREPARING_SLOW_SECONDS = 20
 _PREPARING_TITLE = "⏳ 準備中"
 _PREPARING_TEXT = "音源を準備しています..."
 _PREPARING_SLOW_TEXT = "大変時間がかかっており申し訳ございません。\n現在、音源を準備しております。もうしばらくお待ちください。"
@@ -55,8 +55,8 @@ class _SlowNotice:
 _slow_notices: dict[int, _SlowNotice] = {}
 
 async def _show_slow_notice(message: discord.Message, notice: _SlowNotice) -> None:
-	"""PREPARING_SLOW_SECONDS 秒待ってから、準備中メッセージを待たせていることを詫びる文言に書き換える"""
-	await asyncio.sleep(PREPARING_SLOW_SECONDS)
+	"""_PREPARING_SLOW_SECONDS 秒待ってから、準備中メッセージを待たせていることを詫びる文言に書き換える"""
+	await asyncio.sleep(_PREPARING_SLOW_SECONDS)
 	notice.editing = True
 	try:
 		await message.edit(embed=discord.Embed(title=_PREPARING_TITLE, description=_PREPARING_SLOW_TEXT, color=_YELLOW))
@@ -65,7 +65,7 @@ async def _show_slow_notice(message: discord.Message, notice: _SlowNotice) -> No
 		logger.debug(f"準備中メッセージを書き換えられませんでした: {e!r}")
 
 def _schedule_slow_notice(message: discord.Message) -> None:
-	"""準備中メッセージの書き換えタイマーを開始する"""
+	"""準備中メッセージの書き換えタイマーを開始する (music.spawn は循環 import になるため、参照は _slow_notices で保持する)"""
 	notice = _SlowNotice()
 	notice.task = asyncio.create_task(_show_slow_notice(message, notice), name=f"slow_notice:{message.id}")
 	_slow_notices[message.id] = notice
@@ -92,21 +92,32 @@ async def _settle_slow_notice(message: discord.Message) -> None:
 # ==========================================
 # 内部ヘルパー
 # ==========================================
-async def _send_or_edit(ctx: commands.Context, embed: discord.Embed, edit_msg: discord.Message | None = None, ephemeral: bool = False) -> discord.Message:
-	"""edit_msg があれば編集し、失敗 (削除済みなど) または未指定なら新規送信する"""
+async def _send_or_edit(
+	dest: commands.Context | discord.abc.Messageable,
+	embed: discord.Embed,
+	edit_msg: discord.Message | None = None,
+	*,
+	ephemeral: bool = False,
+) -> discord.Message:
+	"""
+	edit_msg があれば編集し、失敗 (削除済みなど) または未指定なら dest へ新規送信する。
+	- dest はコマンドの ctx か、コマンドの応答ではない通知の送り先チャンネル (ephemeral は ctx のみ)
+	"""
 	if edit_msg:
 		await _settle_slow_notice(edit_msg)
 		try:
 			return await edit_msg.edit(embed=embed)
 		except discord.HTTPException:
 			pass
-	return await ctx.send(embed=embed, ephemeral=ephemeral)
+	if ephemeral:
+		return await dest.send(embed=embed, ephemeral=True)
+	return await dest.send(embed=embed)
 
-async def _send(ctx: commands.Context, title: str, description: str | None = None, color: int = _GREEN, ephemeral: bool = False, edit_msg: discord.Message | None = None) -> discord.Message:
-	"""タイトルと説明文だけのシンプルなEmbedを送信 (edit_msg 指定時は編集) する"""
+async def _send(ctx: commands.Context, title: str, description: str | None = None, color: int = _GREEN, ephemeral: bool = False) -> discord.Message:
+	"""タイトルと説明文だけのシンプルなEmbedを送信する"""
 	if description is not None:
 		description = _truncate(description, _DESCRIPTION_LIMIT)
-	return await _send_or_edit(ctx, discord.Embed(title=title, description=description, color=color), edit_msg, ephemeral)
+	return await _send_or_edit(ctx, discord.Embed(title=title, description=description, color=color), ephemeral=ephemeral)
 
 def _truncate(text: str, limit: int) -> str:
 	"""limit 文字を超える場合は末尾を "..." にして切り詰める"""
@@ -130,7 +141,7 @@ def _music_embed_base(ctx: commands.Context, info: dict, title: str, label: str)
 	"""楽曲・プレイリスト追加通知用Embedのベース (label 欄にタイトルとURL、サムネイル、フッター) を生成する"""
 	url = info.get("webpage_url") or info.get("url")
 	embed = discord.Embed(title=title, color=_BLUE)
-	embed.add_field(name=label, value=_title_link(info.get("title") or "Unknown Title", url), inline=False)
+	embed.add_field(name=label, value=_title_link(info.get("title") or UNKNOWN_TITLE, url), inline=False)
 	_set_requester_footer(embed, ctx)
 	if thumbnail := info.get("thumbnail"):
 		embed.set_image(url=thumbnail)
@@ -154,7 +165,7 @@ def help_pages() -> list[discord.Embed]:
 	p1.add_field(name="/resume",           value="一時停止中の曲の再生を再開します。", inline=False)
 	p1.add_field(name="/replay",           value="現在再生中の曲を最初から再生し直します。", inline=False)
 	p1.add_field(name="/skip",             value="再生中の曲をスキップします。", inline=False)
-	p1.add_field(name="/speed [0.5-3.0] [ピッチ維持]", value="再生速度を変更します（再生中の曲にも即反映）。ピッチ維持を False にすると音の高さも変わります。退出・再生終了で1倍に戻ります。", inline=False)
+	p1.add_field(name=f"/speed [{SPEED_MIN}-{SPEED_MAX}] [ピッチ維持]", value="再生速度を変更します（再生中の曲にも即反映）。ピッチ維持を False にすると音の高さも変わります。退出・再生終了で1倍に戻ります。", inline=False)
 
 	p2 = discord.Embed(title="📖 コマンドヘルプ #2 (キュー・音量)", color=_GREEN)
 	p2.add_field(name="/qlist",              value="現在のキューに入っている曲のリストを表示します。", inline=False)
@@ -162,15 +173,15 @@ def help_pages() -> list[discord.Embed]:
 	p2.add_field(name="/clear [開始] [終了]", value="キューの曲を削除します。引数なしで全件削除、範囲指定も可能です。", inline=False)
 	p2.add_field(name="/loop",               value="キューのループ再生を切り替えます。", inline=False)
 	p2.add_field(name="/sh",                 value="キューの中身をシャッフルします。", inline=False)
-	p2.add_field(name="/vol [1-200]",        value="再生音量を変更し、設定を保存します。", inline=False)
+	p2.add_field(name=f"/vol [{VOLUME_PERCENT_MIN}-{VOLUME_PERCENT_MAX}]", value="再生音量を変更し、設定を保存します。", inline=False)
 
 	p3 = discord.Embed(title="📖 コマンドヘルプ #3 (BOT管理・設定)", color=_GREEN)
 	p3.add_field(name="/move",                         value="BOTを自分のいるボイスチャンネルへ移動させます。", inline=False)
 	p3.add_field(name="/leave",                        value="BOTをボイスチャンネルから退出させ、キューをクリアします。", inline=False)
 	p3.add_field(name="/purge [件数]",                  value="チャンネルのメッセージを一括削除します（管理権限が必要）。", inline=False)
 	p3.add_field(name="/setting admin [add/remove]",   value="BOT操作権限の付与・剥奪を行います。", inline=False)
-	p3.add_field(name="/setting limit [queue/playlist]", value="上限(キュー・プレイリスト)の設定を行います。", inline=False)
-	p3.add_field(name="/setting autoleave [秒数]",       value="聴者がいなくなってから自動で退出するまでの秒数を設定します（0で自動退出しない）。", inline=False)
+	p3.add_field(name=f"/setting limit [queue/playlist] [1-{MAX_LIMIT}]", value="上限(キュー・プレイリスト)の設定を行います。", inline=False)
+	p3.add_field(name=f"/setting autoleave [0-{ALONE_TIMEOUT_MAX}]", value="聴者がいなくなってから自動で退出するまでの秒数を設定します（0で自動退出しない）。", inline=False)
 
 	return [p1, p2, p3]
 
@@ -201,16 +212,7 @@ async def play_completed_embed(ctx: commands.Context) -> None:
 async def alone_leave_embed(channel: discord.abc.Messageable) -> None:
 	"""聴者不在による自動退出の通知。コマンドの応答ではないため ctx ではなくチャンネルへ直接送る"""
 	embed = discord.Embed(title="👋 聴者がいなくなったため再生を停止します", description="ボイスチャンネルから退出しました。", color=_YELLOW)
-	await channel.send(embed=embed)
-
-async def _send_to_channel(channel: discord.abc.Messageable, embed: discord.Embed, edit_msg: discord.Message | None = None) -> discord.Message:
-	"""コマンドの応答ではない通知をチャンネルへ送る。edit_msg があれば編集し、失敗 (削除済みなど) なら新規送信する"""
-	if edit_msg:
-		try:
-			return await edit_msg.edit(embed=embed)
-		except discord.HTTPException:
-			pass
-	return await channel.send(embed=embed)
+	await _send_or_edit(channel, embed)
 
 async def voice_reconnecting_embed(channel: discord.abc.Messageable, attempts: int) -> discord.Message:
 	"""Discord との音声接続が切れ、再接続を始めたときの通知 (結果は同じメッセージを編集して知らせる)"""
@@ -219,7 +221,7 @@ async def voice_reconnecting_embed(channel: discord.abc.Messageable, attempts: i
 		description=f"Discord との通信が一時的に途切れたため、再接続しています… (最大 {attempts} 回)\n再接続できれば、切れた位置から再生を再開します。",
 		color=_YELLOW,
 	)
-	return await _send_to_channel(channel, embed)
+	return await _send_or_edit(channel, embed)
 
 async def voice_reconnected_embed(channel: discord.abc.Messageable, track: dict | None, edit_msg: discord.Message | None = None) -> None:
 	"""再接続に成功したときの通知。再開する曲があれば曲名と再開位置を示す"""
@@ -228,7 +230,7 @@ async def voice_reconnected_embed(channel: discord.abc.Messageable, track: dict 
 	else:
 		description = f"ボイスチャンネルに再接続しました。\n{_title_link(track['title'], track['url'])} を **{format_duration(track['start'])}** から再開します。"
 	embed = discord.Embed(title="✅ 再接続しました", description=_truncate(description, _DESCRIPTION_LIMIT), color=_GREEN)
-	await _send_to_channel(channel, embed, edit_msg)
+	await _send_or_edit(channel, embed, edit_msg)
 
 async def voice_reconnect_failed_embed(channel: discord.abc.Messageable, reason: str, edit_msg: discord.Message | None = None) -> None:
 	"""再接続を諦めて再生を止めたときの通知。reason は「〜ため」で終わる停止の理由"""
@@ -237,7 +239,7 @@ async def voice_reconnect_failed_embed(channel: discord.abc.Messageable, reason:
 		description=f"{reason}、再生を停止しました。キューは空になっています。\n少し時間をおいてから `/p` で再生し直してください。",
 		color=_RED,
 	)
-	await _send_to_channel(channel, embed, edit_msg)
+	await _send_or_edit(channel, embed, edit_msg)
 
 async def loop_switch_embed(ctx: commands.Context, state: str) -> None:
 	await _send(ctx, f"🔁 ループ再生を {state} にしました。")
@@ -273,8 +275,8 @@ async def clear_queue_embed(ctx: commands.Context, count: int) -> None:
 async def play_now_embed(ctx: commands.Context, track: dict, bumped: dict) -> None:
 	"""キューの曲を今すぐ再生した通知。bumped は押しのけられて次の曲に回った曲"""
 	description = (
-		f"{_title_link(_truncate(track.get('title', 'Unknown Title'), _NOW_PLAYING_TITLE_LIMIT), track.get('url'))} を再生します。\n"
-		f"再生中だった {_title_link(_truncate(bumped.get('title', 'Unknown Title'), _NOW_PLAYING_TITLE_LIMIT), bumped.get('url'))} は次に最初から再生します。"
+		f"{_title_link(_truncate(track['title'], _NOW_PLAYING_TITLE_LIMIT), track['url'])} を再生します。\n"
+		f"再生中だった {_title_link(_truncate(bumped['title'], _NOW_PLAYING_TITLE_LIMIT), bumped['url'])} は次に最初から再生します。"
 	)
 	await _send(ctx, "⏯️ 今すぐ再生", description)
 
@@ -297,34 +299,29 @@ async def queue_added_embed(ctx: commands.Context, info: dict, queue_pos: int, e
 
 async def music_info_embed(ctx: commands.Context, source: discord.AudioSource, queue_count: int, wait_msg: discord.Message | None = None) -> None:
 	"""
-	再生中の楽曲情報をEmbedで送信する。
-	- source は data(track dict) / title / display_url / speed / keep_pitch を持つ再生ソース (速度は等速以外のとき表示)
-	- wait_msg が渡された場合はそのメッセージを編集する
-	- 失敗時はフォールバック表示に切り替える
+	再生中の楽曲情報をEmbedで送信する (wait_msg があれば編集する)。
+	- source は data(track dict) / speed / keep_pitch を持つ再生ソース (速度は等速以外のとき表示)
+	- Discord に拒否された場合 (サムネイルの URL が不正など) は簡易表示に切り替える
 	"""
-	title: str = source.title
+	track: dict = source.data
+	embed = discord.Embed(title="🎵 再生中", color=_GREEN)
+	embed.add_field(name="タイトル", value=_title_link(_truncate(track["title"], _NOW_PLAYING_TITLE_LIMIT), track["url"]), inline=False)
+	embed.add_field(name="再生時間", value=format_duration(track["duration"]), inline=True)
+	embed.add_field(name="待機数",   value=f"{queue_count} 曲", inline=True)
+	if source.speed != 1.0:
+		embed.add_field(name="再生速度", value=_speed_label(source.speed, source.keep_pitch), inline=True)
+	_set_requester_footer(embed, ctx)
+	embed.set_image(url=track["thumbnail"] or _FALLBACK_THUMBNAIL)
 	try:
-		data: dict = source.data
-		embed = discord.Embed(title="🎵 再生中", color=_GREEN)
-		embed.add_field(name="タイトル", value=_title_link(_truncate(title, _NOW_PLAYING_TITLE_LIMIT), source.display_url), inline=False)
-		embed.add_field(name="再生時間", value=format_duration(data.get("duration")), inline=True)
-		embed.add_field(name="待機数",   value=f"{queue_count} 曲", inline=True)
-		if source.speed != 1.0:
-			embed.add_field(name="再生速度", value=_speed_label(source.speed, source.keep_pitch), inline=True)
-		_set_requester_footer(embed, ctx)
-		embed.set_image(url=data.get("thumbnail") or _FALLBACK_THUMBNAIL)
 		await _send_or_edit(ctx, embed, wait_msg)
-	except Exception as e:
-		logger.error(f"music_info_embed エラー: {e}")
-		try:
-			await music_info_fallback_embed(ctx, title)
-		except discord.HTTPException:
-			pass
+	except discord.HTTPException as e:
+		logger.warning(f"再生中の表示に失敗したため簡易表示にします: {e}")
+		await _send(ctx, "🎵 再生中", f"{_truncate(track['title'], _FALLBACK_TITLE_LIMIT)}\n(詳細情報の表示に失敗しました)", _RED)
 
 async def preparing_audio_embed(ctx: commands.Context) -> discord.Message:
 	"""
 	音源準備中のウェイトメッセージを送信して、そのMessageオブジェクトを返す。
-	- PREPARING_SLOW_SECONDS 秒たっても結果の表示に置き換わらなければ、待たせていることを詫びる文言に書き換える
+	- _PREPARING_SLOW_SECONDS 秒たっても結果の表示に置き換わらなければ、待たせていることを詫びる文言に書き換える
 	"""
 	message = await _send(ctx, _PREPARING_TITLE, _PREPARING_TEXT, _YELLOW)
 	_schedule_slow_notice(message)
@@ -394,9 +391,6 @@ async def skip_error_embed(ctx: commands.Context, title: str, error: BaseExcepti
 async def exception_embed(ctx: commands.Context, command_name: str, error: BaseException) -> None:
 	await _send_error(ctx, f"❌ エラーが発生しました ({command_name})", error, unknown_lead="管理者にお問い合わせください。")
 
-async def music_info_fallback_embed(ctx: commands.Context, title: str) -> None:
-	await _send(ctx, "🎵 再生中", f"{_truncate(title, _FALLBACK_TITLE_LIMIT)}\n(詳細情報の表示に失敗しました)", _RED)
-
 async def already_paused_embed(ctx: commands.Context) -> None:
 	await _send(ctx, "⚠️ 通知", "既に一時停止中です。", _YELLOW)
 
@@ -447,19 +441,17 @@ async def autoleave_updated_embed(ctx: commands.Context, seconds: int) -> None:
 # ==========================================
 def _queue_line(index: int, track: dict, with_link: bool) -> str:
 	"""キューリストの1行 (番号・タイトル・再生時間) を返す。with_link なら タイトルに URL を埋め込む"""
-	title = _truncate(track.get("title", "Unknown Title"), _QUEUE_TITLE_LIMIT)
+	title = _truncate(track["title"], _QUEUE_TITLE_LIMIT)
 	if with_link:
-		title = _title_link(title, track.get("url"))
-	return f"**{index}.** {title} `[{format_duration(track.get('duration'))}]`"
+		title = _title_link(title, track["url"])
+	return f"**{index}.** {title} `[{format_duration(track['duration'])}]`"
 
 def queue_list_pages(queue: Iterable[dict]) -> list[discord.Embed]:
 	"""
-	キューの内容を _TRACKS_PER_PAGE 曲ずつのページ Embed リストにする。
+	キュー (1 曲以上) の内容を _TRACKS_PER_PAGE 曲ずつのページ Embed リストにする。
 	- タイトルには URL を埋め込む。説明文の上限を超える行はタイトルのみにする
 	"""
 	items = list(queue)
-	if not items:
-		return [discord.Embed(title="📝 キューリスト", description="キューは空です。", color=_BLUE)]
 	total_pages = (len(items) - 1) // _TRACKS_PER_PAGE + 1
 	embeds: list[discord.Embed] = []
 	for page in range(total_pages):
