@@ -29,7 +29,7 @@ from module.errors import report_error
 from module.logger import get_bot_logger, perf, setup_daily_logger
 from module.music import (
 	SPEED_MAX, SPEED_MIN, MusicVoiceClient, YTDLSource, advance_rtp_timestamp, apply_audio_settings, discard_player, get_player, is_in_use,
-	mark_rtp_idle, monitor_loop_lag, play_music, play_now, requeue_track, server_music_data, shutdown_process_pool, spawn,
+	mark_rtp_idle, monitor_loop_lag, play_music, play_now, purge_saved_meta, requeue_track, server_music_data, shutdown_process_pool, spawn,
 	update_alone_timer, warmup_process_pool,
 )
 from module.options import BASE_DIR, app_config
@@ -79,10 +79,11 @@ class SatouSioBot(commands.Bot):
 		self.restart_requested = False
 
 	async def setup_hook(self) -> None:
-		"""起動時の非同期セットアップ: 実行環境の記録 → DB初期化 → 抽出ワーカー準備(並行) → 設定コマンド登録 → スラッシュコマンド同期"""
+		"""起動時の非同期セットアップ: 実行環境の記録 → DB初期化 → 抽出ワーカー準備・期限切れの曲情報の削除(並行) → 設定コマンド登録 → スラッシュコマンド同期"""
 		log_runtime_info()
 		await init_db()
 		spawn(warmup_process_pool(), name="warmup_process_pool")
+		spawn(purge_saved_meta(), name="purge_saved_meta")
 		spawn(monitor_loop_lag(), name="loop_lag_monitor")
 		self._start_daily_restart()
 		setup_setting_commands(self)

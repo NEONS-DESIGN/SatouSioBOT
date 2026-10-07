@@ -6,17 +6,6 @@ from logging.handlers import TimedRotatingFileHandler
 
 from module.options import BASE_DIR, app_config
 
-# ==========================================
-# スピナー状態の共有変数 (utils.py と連携)
-# spinner_active  : スピナーが現在表示中かどうか
-# spinner_line    : スピナーが最後に描画した行の文字列 (再描画用)
-# ==========================================
-spinner_active: bool = False
-spinner_line: str = ""
-
-# カーソルを行頭に戻して現在の行を消す ANSI エスケープシーケンス (utils のスピナーと共用)。
-# 固定幅の空白で上書きすると、コンソールより広い場合に折り返し、ウィンドウを広げたときに後続の表示が右にずれる
-ERASE_LINE = "\r\x1b[2K"
 # ログ出力先ディレクトリとファイル名
 LOG_DIR = BASE_DIR / "log"
 _LOG_FILE_NAME = "bot.log"
@@ -30,8 +19,8 @@ _CONSOLE_ENCODE_ERRORS = "replace"
 def _tolerate_console_encoding() -> None:
 	"""
 	標準出力・標準エラーを、文字コードで表せない文字があっても例外にしない設定にする。
-	出力をパイプやファイルにリダイレクトすると cp932 になり、スピナー記号や曲名の絵文字で
-	UnicodeEncodeError が起きて処理そのものが止まるため
+	出力をパイプやファイルにリダイレクトすると cp932 になり、曲名の絵文字などで
+	UnicodeEncodeError が起きてログが失われるため
 	"""
 	for stream in (sys.stdout, sys.stderr):
 		reconfigure = getattr(stream, "reconfigure", None)
@@ -42,29 +31,6 @@ def _tolerate_console_encoding() -> None:
 		except (ValueError, OSError):
 			# 既に閉じられている・書き込み途中などで変更できない場合は元の設定のまま使う
 			pass
-
-class SpinnerAwareHandler(logging.StreamHandler):
-	"""
-	コンソール出力用のハンドラ。
-	スピナー動作中にログが割り込む場合、以下の順で出力する:
-		1. ERASE_LINE でスピナー行を消す
-		2. ログ行を出力する
-		3. スピナー行を再描画する (改行なし)
-	これによりスピナーとログが混在せずに表示される。
-	"""
-	def emit(self, record: logging.LogRecord) -> None:
-		try:
-			msg = self.format(record)
-			stream = self.stream
-			if spinner_active and spinner_line:
-				# スピナー行を消してからログを出力し、スピナーを再描画する
-				stream.write(f"{ERASE_LINE}{msg}\n")
-				stream.write(spinner_line)
-			else:
-				stream.write(f"{msg}\n")
-			stream.flush()
-		except Exception:
-			self.handleError(record)
 
 class ConsoleFilter(logging.Filter):
 	"""
@@ -78,8 +44,7 @@ class ConsoleFilter(logging.Filter):
 
 def setup_daily_logger() -> None:
 	"""
-	logフォルダにデイリーローテーションするファイルハンドラと、
-	SpinnerAwareHandlerによるコンソールハンドラを設定する。
+	logフォルダにデイリーローテーションするファイルハンドラと、コンソールハンドラを設定する。
 	- コンソール出力は表せない文字を置き換え、文字コードの違いで例外にしない
 	- Bot 本体のロガーは config の debug が True のときだけ DEBUG (計測・内部処理の詳細) まで出す
 	- ライブラリ (discord 等) は常に INFO 以上
@@ -107,8 +72,8 @@ def setup_daily_logger() -> None:
 	file_handler.suffix = "%Y_%m_%d.log"
 	file_handler.extMatch = re.compile(r"^\d{4}_\d{2}_\d{2}\.log$")
 	file_handler.setFormatter(formatter)
-	# コンソールハンドラ: スピナー対応版、discordのINFO以下は除外する
-	console_handler = SpinnerAwareHandler(sys.stdout)
+	# コンソールハンドラ: discordのINFO以下は除外する
+	console_handler = logging.StreamHandler(sys.stdout)
 	console_handler.setFormatter(formatter)
 	console_handler.addFilter(ConsoleFilter())
 	root.addHandler(file_handler)

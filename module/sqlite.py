@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Iterable
 from typing import Any, NamedTuple
 
 import aiosqlite
@@ -67,6 +68,35 @@ async def init_db() -> None:
 		PRIMARY KEY ("guild_id", "user_id")
 	);
 	"""
+	# 曲のメタ情報。url は抽出結果の曲の URL (曲名検索・再生リストの保存から参照する)
+	create_track_meta = """
+	CREATE TABLE IF NOT EXISTS "track_meta" (
+		"url"        TEXT    PRIMARY KEY NOT NULL,
+		"title"      TEXT,
+		"duration"   REAL,
+		"thumbnail"  TEXT,
+		"fetched_at" INTEGER NOT NULL
+	);
+	"""
+	# 曲名検索の結果。query は表記ゆれを揃えた検索語
+	create_search_cache = """
+	CREATE TABLE IF NOT EXISTS "search_cache" (
+		"query"      TEXT    PRIMARY KEY NOT NULL,
+		"track_url"  TEXT    NOT NULL,
+		"fetched_at" INTEGER NOT NULL
+	);
+	"""
+	# 再生リストの結果。track_urls は曲の URL の JSON 配列 (並び順どおり)
+	create_playlist_cache = """
+	CREATE TABLE IF NOT EXISTS "playlist_cache" (
+		"url"         TEXT    PRIMARY KEY NOT NULL,
+		"title"       TEXT,
+		"webpage_url" TEXT,
+		"thumbnail"   TEXT,
+		"track_urls"  TEXT    NOT NULL,
+		"fetched_at"  INTEGER NOT NULL
+	);
+	"""
 	# 旧スキーマに存在しない可能性があるカラムをマイグレーションで追加する
 	migrate_columns: list[tuple[str, str]] = [
 		("queue_limit",    f'ALTER TABLE "server_data" ADD COLUMN "queue_limit"    INTEGER DEFAULT {defaults.queue_limit};'),
@@ -78,6 +108,9 @@ async def init_db() -> None:
 		async with _lock:
 			await db.execute(create_server_data)
 			await db.execute(create_bot_admins)
+			await db.execute(create_track_meta)
+			await db.execute(create_search_cache)
+			await db.execute(create_playlist_cache)
 			for col_name, alter_sql in migrate_columns:
 				try:
 					await db.execute(alter_sql)
@@ -119,6 +152,25 @@ async def sql_execution(query: str, params: tuple = ()) -> list:
 			return result
 	except Exception as e:
 		logger.error(f"[SQLite] クエリ実行エラー: {e} | SQL: {query} | params: {params}")
+		raise
+
+async def sql_execute_batch(statements: Iterable[tuple[str, tuple]]) -> None:
+	"""
+	更新系の SQL をまとめて実行し、最後に 1 回だけ commit する。(途中で失敗・取り消しされたら全体を取り消す)
+	- 失敗時はロガーにエラーを記録してから例外を送出する
+	"""
+	try:
+		db = await _get_connection()
+		async with _lock:
+			try:
+				for query, params in statements:
+					await db.execute(query, params)
+				await db.commit()
+			except BaseException:
+				await db.rollback()
+				raise
+	except Exception as e:
+		logger.error(f"[SQLite] 一括実行エラー: {e}")
 		raise
 
 # ギルド設定のメモリキャッシュ (曲の切り替えのたびに DB を読まないため)。書き込みはこのプロセスの save_guild_setting だけが行う

@@ -11,7 +11,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from module import extractor
+from module import extractor, meta_cache
 from module.embed import (
 	music_info_embed, preparing_audio_embed, playlist_added_embed, queue_added_embed,
 	play_completed_embed, load_error_embed, skip_error_embed, playback_error_embed, alone_leave_embed,
@@ -22,7 +22,7 @@ from module.logger import get_bot_logger, perf
 from module.options import FFMPEG_OPTIONS, app_config
 from module.priority import Priority, boost_playback_thread, set_priority
 from module.sqlite import get_guild_settings
-from module.utils import loading_spinner
+from module.utils import format_duration
 
 logger = get_bot_logger()
 
@@ -36,10 +36,10 @@ STREAM_RETRY_DELAY = 2.0
 STREAM_EXPIRE_MARGIN = 300
 # 検索クエリに付与する yt-dlp の検索プレフィックス (先頭1件のみ取得)
 SEARCH_PREFIX = "ytsearch1:"
+# タイトルが取得できなかった曲の表示名
+UNKNOWN_TITLE = "Unknown Title"
 # URL にこれらが含まれる場合はプレイリストとして扱う
 PLAYLIST_URL_MARKERS = ("list=", "playlist")
-# メタデータキャッシュの最大件数
-META_CACHE_MAX_ENTRIES = 256
 # 再生速度の範囲 (FFmpeg の atempo が 1段で扱える下限が 0.5)
 SPEED_MIN, SPEED_MAX = 0.5, 3.0
 # 1回の read() で返す音声の長さ(秒) と Discord へ送る音声のサンプリングレート
@@ -183,68 +183,47 @@ async def _run_extract(query: str, is_fast: bool, priority: Priority) -> dict:
 		_reset_broken_pool(pool)
 		return await loop.run_in_executor(_get_process_pool(), extractor.extract, query, is_fast, priority)
 
-class _TTLCache:
-	"""上限件数付きの TTL キャッシュ。期限切れは参照時に、上限を超えた分は古い順に捨てる。ttl が 0 以下なら保存しない"""
-	def __init__(self, ttl: float, max_entries: int) -> None:
-		self._ttl = ttl
-		self._max_entries = max_entries
-		self._items: collections.OrderedDict[str, tuple[float, dict]] = collections.OrderedDict()
-
-	def get(self, key: str) -> dict | None:
-		"""有効な値を返す。無い・期限切れなら None"""
-		item = self._items.get(key)
-		if item is None:
-			return None
-		expires_at, value = item
-		if expires_at <= time.monotonic():
-			del self._items[key]
-			return None
-		self._items.move_to_end(key)
-		return value
-
-	def set(self, key: str, value: dict) -> None:
-		"""値を保存する"""
-		if self._ttl <= 0:
-			return
-		self._items[key] = (time.monotonic() + self._ttl, value)
-		self._items.move_to_end(key)
-		while len(self._items) > self._max_entries:
-			self._items.popitem(last=False)
-
-# メタデータ専用のキャッシュ (ストリームURLのように失効しないデータのみ保持する)
-_meta_cache = _TTLCache(app_config.CACHE_TTL, META_CACHE_MAX_ENTRIES)
-
 async def fetch_track_info(query: str, is_fast: bool, priority: Priority = Priority.CURRENT) -> dict:
 	"""
-	extractor.extract をプロセスプール経由で非同期実行する。返り値は共有されうるため変更しないこと。
-	- is_fast=True  (メタデータ): CACHE_TTL秒キャッシュする。メタデータは失効しないため安全。
-	- is_fast=False (ストリームURL): キャッシュしない。URL失効による403を避けるため毎回解決する。
+	extractor.extract をプロセスプール経由で非同期実行する。(毎回取得する。保存した結果を使うかは呼び出し側が決める)
+	- is_fast=True : メタデータのみ (曲名検索・再生リスト)
+	- is_fast=False: ストリームURLまで解決する
 	- priority: 抽出を行うワーカーの CPU 優先度
 	"""
 	t = time.perf_counter()
-	if is_fast and (hit := _meta_cache.get(query)) is not None:
-		perf("メタ取得(cacheヒット)", t)
-		return hit
-	logger.debug(f"{'メタデータの新規取得' if is_fast else 'ストリームURLの解決'}: {query}")
 	info = await _run_extract(query, is_fast, priority)
 	perf("メタ抽出(yt-dlp)" if is_fast else "本抽出(yt-dlp/stream_url)", t)
 	if info.pop(extractor.FALLBACK_FLAG, False):
 		logger.warning(f"高速設定での抽出に失敗したため予備設定で取得しました: {query}")
-	if is_fast:
-		_meta_cache.set(query, info)
 	return info
+
+async def purge_saved_meta() -> None:
+	"""保存期間を過ぎた曲情報・曲名検索・再生リストの保存を消す。(起動時に呼ぶ) 失敗しても起動は続ける"""
+	try:
+		count = await meta_cache.purge_expired()
+	except Exception as e:
+		logger.warning(f"保存期間を過ぎた曲情報の削除に失敗しました: {e!r}")
+		return
+	if count:
+		logger.info(f"保存期間を過ぎた曲情報 {count} 件を削除しました。")
 
 # ==========================================
 # トラック (plain dict)
 # ==========================================
-def _new_track(entry: dict, requester_id: int) -> dict | None:
-	"""抽出結果のエントリから track dict を生成する。再生用URLが無ければ None"""
-	url = entry.get("webpage_url") or entry.get("original_url") or entry.get("url")
+def _new_track(entry: dict, requester_id: int, guild_name: str, search_query: str | None = None) -> dict | None:
+	"""
+	抽出結果のエントリから track dict を生成する。再生用URLが無ければ None。
+	- guild_name: ログで曲をどのサーバーのものか示すために持たせる
+	- search_query: 保存した曲名検索の結果から作った曲なら、その検索語のキー (取得できなかったときに検索し直す)
+	"""
+	url = meta_cache.entry_url(entry)
 	if not url:
 		return None
 	return {
 		"url": url,
-		"title": entry.get("title") or "Unknown Title",
+		"title": entry.get("title") or UNKNOWN_TITLE,
+		"guild_name": guild_name,
+		"search_query": search_query,
 		"author_id": requester_id,
 		"thumbnail": entry.get("thumbnail"),
 		"duration": entry.get("duration") or 0,
@@ -298,30 +277,91 @@ def _drop_expiring_stream(track: dict) -> None:
 	if expires_in is not None and not _stream_lasts(track, expires_in):
 		track.update(stream_url=None, http_headers={}, fetch_task=None)
 
+def _guild_tag(guild_name: str) -> str:
+	"""ログの先頭に付ける、サーバー名の表記"""
+	return f"[{guild_name}]"
+
+def _tag(track: dict) -> str:
+	"""ログの先頭に付ける、曲のサーバー名の表記"""
+	return _guild_tag(track["guild_name"])
+
+def _elapsed(start: float) -> str:
+	"""start (time.perf_counter() の値) からの経過秒数のログ用表記"""
+	return f"{time.perf_counter() - start:.2f}s"
+
+async def _search_again(track: dict, priority: Priority) -> bool:
+	"""
+	保存した曲名検索の結果から作った曲を取得できなかったときに、保存を消して検索し直す。
+	別の曲が見つかれば track をその曲に差し替えて True を返す。(動画の削除・非公開などで、保存した曲が再生できなくなった場合) 失敗しても例外を出さない
+	"""
+	query, track["search_query"] = track["search_query"], None
+	await meta_cache.forget_search(query)
+	try:
+		info = await fetch_track_info(SEARCH_PREFIX + query, True, priority)
+	except Exception as e:
+		logger.warning(f"{_tag(track)} 曲の検索し直しに失敗しました:「{query}」: {e}")
+		return False
+	entries = info.get("entries") or []
+	if not entries or not (url := meta_cache.entry_url(entries[0])):
+		return False
+	spawn(meta_cache.save_search(query, entries[0]), name="save_search")
+	if url == track["url"]:
+		return False
+	logger.info(f"{_tag(track)} 検索し直して見つかった曲に差し替えます:「{query}」: {track['title']} → {entries[0].get('title')}")
+	track.update(
+		url=url,
+		title=entries[0].get("title") or UNKNOWN_TITLE,
+		thumbnail=entries[0].get("thumbnail"),
+		duration=entries[0].get("duration") or 0,
+	)
+	return True
+
 async def _resolve_stream(track: dict, priority: Priority) -> None:
-	"""track の stream_url を解決する (MAX_RETRIES 回まで再試行)。最終的に失敗したら例外を送出する"""
+	"""
+	track の stream_url を解決する (MAX_RETRIES 回まで再試行)。最終的に失敗したら例外を送出する。
+	- 開始・完了・失敗を試行回数とともにログに出す (先読みはそれと分かるようにする)
+	- 保存した曲名検索の結果から作った曲は、失敗したら検索し直してから再試行する。(別の曲に差し替えたら待たずに再試行する)
+	  最後の試行で失敗した場合も保存は消し、次の /p で検索し直させる。一度取得できた曲は以後検索し直さない
+	"""
 	max_retries = app_config.MAX_RETRIES
-	for attempt in range(1, max_retries + 1):
-		try:
-			info = await loading_spinner(
-				fetch_track_info(track["url"], False, priority),
-				f"音源ロード: {track['title']} ({attempt}/{max_retries})",
-			)
-			# プレイリスト形式で返ってきた場合は先頭エントリを使用する
-			if info.get("entries"):
-				info = info["entries"][0]
-			if not info.get("url"):
-				raise ValueError("ストリームURLが取得できませんでした")
-			track["stream_url"] = info["url"]
-			track["http_headers"] = info.get("http_headers") or {}
-			track["duration"] = info.get("duration") or track["duration"]
-			return
-		except Exception as e:
-			if attempt == max_retries:
-				logger.warning(f"{track['title']} の取得に最終的に失敗: {e}")
-				raise
-			logger.warning(f"{track['title']} のロード失敗、リトライ ({attempt})...")
-			await asyncio.sleep(STREAM_RETRY_DELAY)
+	kind = "先読み" if priority is not Priority.CURRENT else "音源"
+	label = f"{kind}ロード"
+	try:
+		for attempt in range(1, max_retries + 1):
+			label = f"{kind}ロード ({attempt}/{max_retries})"
+			logger.info(f"{_tag(track)} {label} 開始: {track['title']}")
+			t = time.perf_counter()
+			try:
+				info = await fetch_track_info(track["url"], False, priority)
+				# プレイリスト形式で返ってきた場合は先頭エントリを使用する
+				if info.get("entries"):
+					info = info["entries"][0]
+				if not info.get("url"):
+					raise ValueError("ストリームURLが取得できませんでした")
+				track["stream_url"] = info["url"]
+				track["http_headers"] = info.get("http_headers") or {}
+				track["duration"] = info.get("duration") or track["duration"]
+				# 取得できた曲は、ループなどで後から一時的に失敗しても別の曲へ差し替えない
+				track["search_query"] = None
+				logger.info(f"{_tag(track)} {label} 完了 ({_elapsed(t)}): {track['title']}")
+				return
+			except Exception as e:
+				if attempt == max_retries:
+					logger.warning(f"{_tag(track)} {label} 失敗、取得を諦めます ({_elapsed(t)}): {track['title']}: {e}")
+					if (query := track["search_query"]) is not None:
+						track["search_query"] = None
+						await meta_cache.forget_search(query)
+					raise
+				if track["search_query"] is not None:
+					logger.warning(f"{_tag(track)} {label} 失敗、検索し直します ({_elapsed(t)}): {track['title']}: {e}")
+					if await _search_again(track, priority):
+						continue
+				else:
+					logger.warning(f"{_tag(track)} {label} 失敗、{STREAM_RETRY_DELAY:g} 秒後に再試行します ({_elapsed(t)}): {track['title']}: {e}")
+				await asyncio.sleep(STREAM_RETRY_DELAY)
+	except asyncio.CancelledError:
+		logger.info(f"{_tag(track)} {label} 中止: {track['title']}")
+		raise
 
 def ensure_stream(track: dict, priority: Priority = Priority.CURRENT) -> asyncio.Task:
 	"""
@@ -534,7 +574,7 @@ class YTDLSource(discord.FFmpegOpusAudio):
 		if (process := getattr(self, "_process", None)) is not None:
 			set_priority(Priority.PLAYBACK, process.pid)
 		self.data = track
-		self.title: str = track.get("title", "Unknown Title")
+		self.title: str = track.get("title", UNKNOWN_TITLE)
 		self.display_url: str = track.get("url", "")
 		self.volume = volume
 		self.speed = speed
@@ -677,11 +717,26 @@ async def advance_rtp_timestamp(vc: discord.VoiceClient) -> None:
 		return
 	vc.timestamp = (vc.timestamp + elapsed) % RTP_TIMESTAMP_MOD
 
-def _make_after_callback(ctx: commands.Context, loop: asyncio.AbstractEventLoop):
-	"""再生終了時 (再生スレッドから呼ばれる) に次曲の再生をイベントループへ投げるコールバックを返す"""
+def _played_until(guild_id: int, source: YTDLSource) -> float:
+	"""再生を終えた位置 (元音源の秒) を返す。設定変更でソースが差し替わっていれば、差し替え後のソースの位置を使う"""
+	player = server_music_data.get(guild_id)
+	latest = player.source if player is not None else None
+	if isinstance(latest, YTDLSource) and latest.data is source.data:
+		return latest.position
+	return source.position
+
+def _make_after_callback(ctx: commands.Context, loop: asyncio.AbstractEventLoop, source: YTDLSource):
+	"""再生終了時 (再生スレッドから呼ばれる) に、終了をログに出して次曲の再生をイベントループへ投げるコールバックを返す"""
 	guild_id = ctx.guild.id
+	track = source.data
 	def _after_playing(error: Exception | None) -> None:
 		mark_rtp_idle(guild_id)
+		try:
+			played = format_duration(_played_until(guild_id, source))
+			logger.info(f"{_tag(track)} 再生終了 ({played} / {format_duration(track['duration'])}): {track['title']}")
+		except Exception as e:
+			# ログの失敗で次の曲へ進めなくならないようにする
+			logger.warning(f"再生終了の記録に失敗しました (ギルド {guild_id}): {e!r}")
 		if error:
 			logger.error(f"再生時エラー (ギルド {guild_id}): {error}")
 		# 終了処理でループが閉じた後に呼ばれた場合は何もしない
@@ -1051,7 +1106,7 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 		if await _interrupted(guild, player, vc, track, wait_msg, source):
 			continue
 		try:
-			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop()))
+			vc.play(source, after=_make_after_callback(ctx, asyncio.get_running_loop(), source))
 		except Exception as e:
 			report_error(f"再生開始エラー (ギルド {guild.id})", e)
 			await asyncio.to_thread(source.cleanup)
@@ -1061,6 +1116,9 @@ async def _advance(ctx: commands.Context, player: GuildMusicPlayer) -> None:
 		player.source = source
 		player.lost_channel = None
 		_start_preload_watch(guild, player)
+		position = f"{format_duration(track['start'])} から / " if track["start"] > 0 else ""
+		waited = f"、コマンドから {_elapsed(track['t_request'])}" if track["t_request"] is not None else ""
+		logger.info(f"{_tag(track)} 再生開始 ({position}{format_duration(track['duration'])}{waited}): {track['title']}")
 		if track["t_request"] is not None:
 			perf("★総計 コマンド→再生開始", track["t_request"])
 		await music_info_embed(ctx, source, len(player.queue), wait_msg)
@@ -1200,6 +1258,86 @@ async def _leave_if_unused(guild: discord.Guild, player: GuildMusicPlayer, voice
 	discard_player(guild.id)
 	await vc.disconnect()
 
+def _cancel_fetch(track: dict | None) -> None:
+	"""track の解決タスクがあれば取り消す"""
+	if track is not None and (task := track["fetch_task"]) is not None:
+		task.cancel()
+
+async def _load_single(guild_name: str, url: str) -> dict:
+	"""単曲 URL の曲情報をストリームURLまで取得する (開始・完了をログに出す)"""
+	logger.info(f"{_guild_tag(guild_name)} 音源ロード開始: {url}")
+	t = time.perf_counter()
+	info = await fetch_track_info(url, False)
+	logger.info(f"{_guild_tag(guild_name)} 音源ロード完了 ({_elapsed(t)}): {info.get('title') or url}")
+	return info
+
+async def _load_search(guild_name: str, query: str) -> tuple[dict, str | None]:
+	"""
+	曲名検索の結果を返す。保存した結果があれば検索を省き、無ければ検索して結果を保存する。
+	- 2 つ目の返り値は、保存した結果を使った場合の検索語のキー。(その曲を取得できなかったときに検索し直すため track に付ける) 検索した場合は None
+	"""
+	key = meta_cache.normalize_query(query)
+	if (entry := await meta_cache.get_search(key)) is not None:
+		logger.info(f"{_guild_tag(guild_name)} 検索結果を保存済みの情報から取得:「{query}」→ {entry['title']}")
+		return {"entries": [entry]}, key
+	logger.info(f"{_guild_tag(guild_name)} 曲の検索開始:「{query}」")
+	t = time.perf_counter()
+	info = await fetch_track_info(SEARCH_PREFIX + query, True)
+	entries = info.get("entries") or []
+	found = entries[0].get("title") if entries else "該当なし"
+	logger.info(f"{_guild_tag(guild_name)} 曲の検索完了 ({_elapsed(t)}):「{query}」→ {found}")
+	if entries:
+		spawn(meta_cache.save_search(key, entries[0]), name="save_search")
+	return info, None
+
+async def _load_playlist(guild_name: str, url: str, requester_id: int, start_early: bool) -> tuple[dict, dict | None]:
+	"""
+	再生リストの曲情報を返す。保存してから CACHE_TTL 秒以内なら、保存した結果をそのまま使う。
+	- それより古い保存があり、すぐ再生を始める見込み (start_early) なら、保存した 1 曲目の音源ロードを先に始めてから最新の並びを取り直す。
+	  2 つ目の返り値はその先に始めた track (呼び出し側は 1 曲目が変わっていなければ使い、変わっていれば取り消す)
+	- 取り直しに失敗したら、保存した結果を使う
+	"""
+	cached = await meta_cache.get_playlist(url)
+	if cached is not None and cached.age < app_config.CACHE_TTL:
+		logger.info(f"{_guild_tag(guild_name)} 再生リストを保存済みの情報から取得 ({len(cached.info['entries'])} 曲): {cached.info.get('title') or url}")
+		return cached.info, None
+	early: dict | None = None
+	if cached is not None and start_early and cached.info["entries"]:
+		early = _new_track(cached.info["entries"][0], requester_id, guild_name)
+		if early is not None:
+			logger.info(f"{_guild_tag(guild_name)} 保存済みの再生リストの 1 曲目を先に読み込みます: {early['title']}")
+			ensure_stream(early)
+	logger.info(f"{_guild_tag(guild_name)} 再生リストの取得開始: {url}")
+	t = time.perf_counter()
+	try:
+		info = await fetch_track_info(url, True)
+	except asyncio.CancelledError:
+		_cancel_fetch(early)
+		raise
+	except Exception as e:
+		if cached is None:
+			raise
+		logger.warning(f"{_guild_tag(guild_name)} 再生リストを取得できなかったため、保存済みの情報を使います: {url}: {e}")
+		return cached.info, early
+	logger.info(f"{_guild_tag(guild_name)} 再生リストの取得完了 ({_elapsed(t)}, {len(info.get('entries') or [])} 曲): {info.get('title') or url}")
+	spawn(meta_cache.save_playlist(url, info), name="save_playlist")
+	return info, early
+
+def _adopt_early(tracks: list[dict], early: dict | None) -> dict | None:
+	"""
+	先に音源ロードを始めた保存済みの 1 曲目が、取り直した並びの 1 曲目と同じなら tracks[0] をそれに置き換える。
+	使わなかった場合は取り消すべき track を返す (使った・無かった場合は None)
+	"""
+	if early is None:
+		return None
+	if not tracks or tracks[0]["url"] != early["url"]:
+		logger.info(f"{_tag(early)} 再生リストの 1 曲目が変わっていたため、先に始めた読み込みを取り消します: {early['title']}")
+		return early
+	# タイトル・サムネイルは取り直した最新の情報にする (再生時間は音源ロードの結果で埋まる)
+	early.update(title=tracks[0]["title"], thumbnail=tracks[0]["thumbnail"])
+	tracks[0] = early
+	return None
+
 async def play_music(
 	ctx: commands.Context,
 	query: str,
@@ -1229,9 +1367,9 @@ async def _play_music(
 	URLまたは検索クエリを解析してキューに追加し、アイドル状態なら再生を開始する。
 	- 応答の保留(defer_task)・待機メッセージ送信・情報取得・ギルド設定読込・VC接続(voice_task)を並行して進める
 	- メッセージ送信は defer_task の完了後に行う
-	- プレイリスト: playlist_limit 件まで追加 (ストリームURLは先読みで解決)
+	- プレイリスト: playlist_limit 件まで追加 (ストリームURLは先読みで解決)。保存した結果があれば、新しいうちはそのまま使い、古ければ 1 曲目を先に読み込みながら取り直す
 	- 単曲URL: ストリームURLまで一度に解決する
-	- 検索クエリ: ytsearch1: でメタデータを取得し、ストリームURLは再生時または先読みで解決する
+	- 検索クエリ: 保存した検索結果、無ければ ytsearch1: でメタデータを取得し、ストリームURLは再生時または先読みで解決する
 	"""
 	guild_id = ctx.guild.id
 	player.text_channel = ctx.channel
@@ -1245,12 +1383,18 @@ async def _play_music(
 
 	wait_task = spawn(_send_wait_msg(), name="wait_msg") if is_idle else None
 	settings_task = spawn(get_guild_settings(guild_id), name="guild_settings")
+	guild_name = ctx.guild.name
 	early_fetch: asyncio.Task | None = None
+	# 保存済みの再生リストの 1 曲目として先に音源ロードを始めた track (まだ使うか決まっていないもの)
+	early_track: dict | None = None
 	try:
+		search_query: str | None = None
 		if is_single_url:
-			info = await loading_spinner(fetch_track_info(query, False), "音源の取得")
+			info = await _load_single(guild_name, query)
+		elif is_url:
+			info, early_track = await _load_playlist(guild_name, query, ctx.author.id, is_idle)
 		else:
-			info = await loading_spinner(fetch_track_info(query if is_url else SEARCH_PREFIX + query, True), "メタデータ検索")
+			info, search_query = await _load_search(guild_name, query)
 		is_playlist_result = "entries" in info and is_url
 		entries = info["entries"] if "entries" in info else [info]
 
@@ -1259,9 +1403,11 @@ async def _play_music(
 		if available <= 0:
 			raise UserFacingError(f"キューの上限({settings.queue_limit}曲)に達しているため追加できません。")
 		limit = min(settings.playlist_limit, available) if is_playlist_result else available
-		tracks = [track for entry in entries[:limit] if (track := _new_track(entry, ctx.author.id))]
+		tracks = [track for entry in entries[:limit] if (track := _new_track(entry, ctx.author.id, guild_name, search_query))]
 		if not tracks:
 			raise UserFacingError("再生可能な動画が見つかりませんでした。検索語や URL を変えてお試しください。")
+		unused, early_track = _adopt_early(tracks, early_track), None
+		_cancel_fetch(unused)
 		# 単曲URLは解決済みのストリーム情報をそのまま使う
 		if is_single_url and not is_playlist_result and info.get("url"):
 			tracks[0]["stream_url"] = info["url"]
@@ -1272,10 +1418,16 @@ async def _play_music(
 			early_fetch = ensure_stream(tracks[0])
 		if voice_task is not None:
 			await voice_task
+	except asyncio.CancelledError:
+		if early_fetch is not None:
+			early_fetch.cancel()
+		_cancel_fetch(early_track)
+		raise
 	except Exception as e:
 		report_error("play_music 解析エラー", e)
 		if early_fetch is not None:
 			early_fetch.cancel()
+		_cancel_fetch(early_track)
 		await _await_quietly(defer_task)
 		await _notify(load_error_embed(ctx, e, edit_msg=await _await_quietly(wait_task)))
 		await _leave_if_unused(ctx.guild, player, voice_task)

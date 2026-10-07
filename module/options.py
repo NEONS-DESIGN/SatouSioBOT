@@ -61,7 +61,12 @@ class Config:
 		self.DEFAULT_PLAYLIST_LIMIT: int = min(max(self._get("default_playlist_limit", 10, int), 1), MAX_LIMIT)
 		self.MAX_RETRIES: int = max(self._get("max_retries", 3, int), 1)
 		self.MAX_WORKER_THREADS: int = max(self._get("max_worker_threads", 2, int), 1)
+		# 再生リストの保存した結果を、取り直さずにそのまま使う秒数
 		self.CACHE_TTL: int = max(self._get("cache_ttl", 14400, int), 0)
+		# 曲名検索の結果 (どの曲か) を保存しておく日数。0 は保存しない
+		self.SEARCH_CACHE_DAYS: int = max(self._get("search_cache_days", 30, int), 0)
+		# 曲のメタ情報 (タイトル・再生時間・サムネイル) を保存しておく日数。0 は検索・再生リストの結果も含めて保存しない
+		self.TRACK_CACHE_DAYS: int = max(self._get("track_cache_days", 183, int), 0)
 		self.DEFAULT_ALONE_TIMEOUT: int = min(max(self._get("default_alone_timeout", 10, int), 0), ALONE_TIMEOUT_MAX)
 		# True のときのみ所要時間の計測や内部処理の詳細をログに出す
 		self.DEBUG: bool = self._get("debug", False, bool)
