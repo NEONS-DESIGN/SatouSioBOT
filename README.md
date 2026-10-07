@@ -3,7 +3,7 @@
 <p align="center">砂糖塩という、Discordの音楽再生Botです。できるだけ起動するだけで使用ができるように制作されています。</p>
 
 <p align="center">
-  <a href="https://www.python.org/downloads/release/python-31312/"><img src="https://img.shields.io/badge/Python-v3.13.x-ffde57" alt="Python"></a>
+  <a href="https://www.python.org/downloads/release/python-3148/"><img src="https://img.shields.io/badge/Python-v3.14.x-ffde57" alt="Python"></a>
   <a href="https://github.com/Rapptz/discord.py"><img src="https://img.shields.io/badge/Discord.py-v2.7.1-3498db" alt="Discord.py"></a>
   <a href="https://github.com/yt-dlp/yt-dlp"><img src="https://img.shields.io/badge/yt--dlp-v2026.08.19-FF0000" alt="yt-dlp"></a>
   <a href="https://ffmpeg.org/"><img src="https://img.shields.io/badge/ffmpeg-v8.1-242424" alt="FFmpeg"></a>
@@ -81,7 +81,7 @@ yt-dlp による解析を別プロセスで並列実行し、ローカルブラ�
 
 | ソフトウェア | 用途 |
 |---|---|
-| [**Python 3.13.x**](https://www.python.org/downloads/) | Bot本体の実行 |
+| [**Python 3.14.x**](https://www.python.org/downloads/) | Bot本体の実行 |
 | [**FFmpeg**](https://www.ffmpeg.org/) | 音声のデコード・ストリーミング |
 | [**Deno**](https://deno.com/) | YouTube の再生用署名の解読 (yt-dlp が使用) |
 | [**Firefox**](https://www.mozilla.org/firefox/) | Cookie の参照元。**YouTube にログインした状態**にしておいてください。 |
@@ -102,11 +102,11 @@ yt-dlp による解析を別プロセスで並列実行し、ローカルブラ�
 プロジェクトのフォルダで仮想環境 (venv) を作成し、必要なライブラリをインストールしてください。
 
 ```bash
-py -3.13 -m venv venv
+py -3.14 -m venv venv
 venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-`start.bat` / `start.ps1` は `venv` があれば自動でそちらを使用します。venv を作らない場合は、`py -3.13 -m pip install -r requirements.txt` でインストールしてください。
+`start.bat` / `start.ps1` は `venv` があれば自動でそちらを使用します。venv を作らない場合は、`py -3.14 -m pip install -r requirements.txt` でインストールしてください。
 
 ---
 

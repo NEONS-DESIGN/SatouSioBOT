@@ -153,7 +153,8 @@ class _ResidentDeno:
 
 	def _failure(self, reason: str) -> JsChallengeProviderError:
 		"""通信の失敗を表す例外を作る (Deno の標準エラーの末尾を添える)"""
-		if stderr := " / ".join(line for line in self._stderr if line):
+		# 読み込みスレッドが append している最中に反復すると "deque mutated during iteration" になるため、複製を連結する
+		if stderr := " / ".join(line for line in self._stderr.copy() if line):
 			reason = f"{reason} (stderr: {stderr[-STDERR_MESSAGE_LIMIT:]})"
 		return JsChallengeProviderError(reason)
 

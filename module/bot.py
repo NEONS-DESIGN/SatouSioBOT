@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import json
 import os
+import platform
 import random
 import sys
 import time
@@ -49,6 +50,15 @@ VOLUME_MIN, VOLUME_MAX = 1, 200
 # スラッシュコマンドを最後に同期したときの定義のハッシュを保存するファイル
 COMMAND_HASH_FILE = BASE_DIR / "command_sync.hash"
 
+
+def log_runtime_info() -> None:
+	"""Python のバージョンと GIL の状態をログに残す (フリースレッド版でも、非対応の拡張モジュールを読み込むと GIL は有効に戻る)"""
+	gil = "不明"
+	# sys._is_gil_enabled は 3.13 以降にのみ存在する
+	if (is_gil_enabled := getattr(sys, "_is_gil_enabled", None)) is not None:
+		gil = "有効" if is_gil_enabled() else "無効 (フリースレッド動作)"
+	logger.info(f"Python {platform.python_version()} ({platform.python_implementation()}) / GIL: {gil} / discord.py {discord.__version__}")
+
 # ==========================================
 # Bot本体
 # ==========================================
@@ -69,7 +79,8 @@ class SatouSioBot(commands.Bot):
 		self.restart_requested = False
 
 	async def setup_hook(self) -> None:
-		"""起動時の非同期セットアップ: DB初期化 → 抽出ワーカー準備(並行) → 設定コマンド登録 → スラッシュコマンド同期"""
+		"""起動時の非同期セットアップ: 実行環境の記録 → DB初期化 → 抽出ワーカー準備(並行) → 設定コマンド登録 → スラッシュコマンド同期"""
+		log_runtime_info()
 		await init_db()
 		spawn(warmup_process_pool(), name="warmup_process_pool")
 		spawn(monitor_loop_lag(), name="loop_lag_monitor")
