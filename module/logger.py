@@ -28,6 +28,21 @@ def _tolerate_console_encoding() -> None:
 		with contextlib.suppress(AttributeError, ValueError, OSError):
 			stream.reconfigure(errors=_CONSOLE_ENCODE_ERRORS)
 
+class AlignedFormatter(logging.Formatter):
+	"""
+	"[INFO]" などのレベル表記を最長のレベル名の幅にスペースで揃え、ロガー名以降の開始位置を一定にする。
+	書式中の %(levelbracket)s が、幅を揃えた "[レベル名]" に置き換わる
+	"""
+	# 標準レベルのうち最長の名前 ("CRITICAL") に角括弧の 2 文字を足した幅
+	LEVEL_WIDTH = max(
+		len(logging.getLevelName(level))
+		for level in (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, logging.CRITICAL)
+	) + 2
+
+	def format(self, record: logging.LogRecord) -> str:
+		record.levelbracket = f"[{record.levelname}]".ljust(self.LEVEL_WIDTH)
+		return super().format(record)
+
 class ConsoleFilter(logging.Filter):
 	"""discord ライブラリの WARNING 未満のログをコンソールから除外する"""
 	def filter(self, record: logging.LogRecord) -> bool:
@@ -48,8 +63,8 @@ def setup_daily_logger() -> None:
 	# 重複登録を防ぐため既存ハンドラをクリアする
 	if root.hasHandlers():
 		root.handlers.clear()
-	formatter = logging.Formatter(
-		fmt="%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s: %(message)s",
+	formatter = AlignedFormatter(
+		fmt="%(asctime)s.%(msecs)03d %(levelbracket)s %(name)s: %(message)s",
 		datefmt="%Y-%m-%d %H:%M:%S",
 	)
 	# ファイルハンドラ: 全ログを日付ごとのファイルに保存する
