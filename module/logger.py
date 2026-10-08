@@ -30,22 +30,17 @@ def _tolerate_console_encoding() -> None:
 
 class AlignedFormatter(logging.Formatter):
 	"""
-	レベル表記とロガー名をそれぞれ固定幅にスペースで揃え、ロガー名とメッセージの開始位置を一定にする。
-	書式中の %(levelbracket)s が幅を揃えた "[レベル名]" に、%(namelabel)s が幅を揃えた "ロガー名:" に置き換わる。
-	幅を超えるロガー名は切り詰めず、その行だけ後ろにずれる
+	"[INFO]" などのレベル表記を最長のレベル名の幅にスペースで揃え、ロガー名以降の開始位置を一定にする。
+	書式中の %(levelbracket)s が、幅を揃えた "[レベル名]" に置き換わる
 	"""
 	# 標準レベルのうち最長の名前 ("CRITICAL") に角括弧の 2 文字を足した幅
 	LEVEL_WIDTH = max(
 		len(logging.getLevelName(level))
 		for level in (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, logging.CRITICAL)
 	) + 2
-	# 出力されるロガー名のうち長いもの ("discord.voice_state" / "discord.voice_client") が収まる幅
-	NAME_WIDTH = 20
 
 	def format(self, record: logging.LogRecord) -> str:
 		record.levelbracket = f"[{record.levelname}]".ljust(self.LEVEL_WIDTH)
-		# 区切りの ":" はロガー名の直後に付け、その後ろを埋める
-		record.namelabel = f"{record.name}:".ljust(self.NAME_WIDTH + 1)
 		return super().format(record)
 
 class ConsoleFilter(logging.Filter):
@@ -69,7 +64,7 @@ def setup_daily_logger() -> None:
 	if root.hasHandlers():
 		root.handlers.clear()
 	formatter = AlignedFormatter(
-		fmt="%(asctime)s.%(msecs)03d %(levelbracket)s %(namelabel)s %(message)s",
+		fmt="%(asctime)s.%(msecs)03d %(levelbracket)s %(name)s: %(message)s",
 		datefmt="%Y-%m-%d %H:%M:%S",
 	)
 	# ファイルハンドラ: 全ログを日付ごとのファイルに保存する
